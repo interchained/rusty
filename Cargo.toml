@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/itc-proto", "crates/itc-node"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Interchained LLC"]
+
+# Slice 1 (this commit): workspace + ITC protocol constants + instant-boot
+# trust-anchor architecture, dependency-free so it builds offline.
+# Next slices add: the rust-bitcoin fork (itc-proto becomes it), nedb-engine
+# (storage), and an ElectrumX client (wallet).

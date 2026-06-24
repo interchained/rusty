@@ -1,0 +1,10 @@
+[package]
+name = "itc-proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ITC network protocol layer — wire constants, message kinds, and the NEDB Proof-of-Prefix seam. Becomes a fork of rust-bitcoin in a later slice."
+
+[dependencies]
+# Intentionally dependency-free for slice 1 (builds offline).
