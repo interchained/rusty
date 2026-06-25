@@ -12,8 +12,10 @@ pub mod consensus;
 pub mod hashes;
 pub mod message;
 pub mod seam;
+pub mod work;
 
 pub use seam::{AnchorTip, SeamResult};
+pub use work::{work_from_bits, U256};
 
 /// ITC mainnet network magic — itcd `pchMessageStart = {1C, 7C, D0, 0D}`.
 pub const MAGIC_MAIN: [u8; 4] = [0x1C, 0x7C, 0xD0, 0x0D];

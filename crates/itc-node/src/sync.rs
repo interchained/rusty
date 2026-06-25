@@ -1,0 +1,51 @@
+//! Forward header sync — repeatedly `getheaders` from the anchor, connecting each
+//! batch to the chain until we reach the anchor's tip.
+
+use std::io;
+
+use crate::chain::{ConnectOutcome, HeaderChain};
+use crate::p2p::Peer;
+
+/// Sync headers forward from `peer` into `chain` until caught up.
+pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain) -> io::Result<()> {
+    let target = peer.peer_height;
+    let mut rounds = 0u32;
+    loop {
+        rounds += 1;
+        let locator = chain.block_locator();
+        let batch = peer.get_headers(locator)?;
+        if batch.is_empty() {
+            break;
+        }
+        let before = chain.tip_height();
+        let mut extended = 0usize;
+        for h in batch.iter() {
+            match chain.connect(h.clone()) {
+                ConnectOutcome::Extended(_) => extended += 1,
+                ConnectOutcome::HeavierFork(ht) => {
+                    println!(
+                        "itc-node[sync]: heavier competing chain at height {ht} — Proof-of-Prefix MISMATCH flagged"
+                    );
+                }
+                _ => {}
+            }
+        }
+        let after = chain.tip_height();
+        println!(
+            "itc-node[sync]: +{extended} headers — tip now {after} / anchor {target}",
+        );
+        if after == before {
+            break; // no progress (caught up or a non-extending batch)
+        }
+        if batch.len() < 2000 {
+            break; // short batch → at the tip
+        }
+        if target > 0 && after >= target {
+            break; // reached the anchor's height
+        }
+        if rounds > 100_000 {
+            break; // hard safety cap
+        }
+    }
+    Ok(())
+}

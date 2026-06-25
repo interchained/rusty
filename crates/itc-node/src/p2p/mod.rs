@@ -35,7 +35,23 @@ impl Peer {
         Ok(peer)
     }
 
-    fn handshake(&mut self, our_height: i32) -> io::Result<()> {
+    /// Wrap an already-accepted inbound stream (for the seeding server). Call
+    /// [`Peer::handshake`] next to complete the responder handshake.
+    pub fn from_stream(stream: TcpStream, magic: [u8; 4]) -> Peer {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(120)));
+        Peer {
+            stream,
+            magic,
+            peer_version: 0,
+            peer_height: 0,
+            peer_user_agent: String::new(),
+        }
+    }
+
+    /// Complete the version/verack handshake (works for both initiator and
+    /// responder — both sides send `version` first, then exchange `verack`).
+    pub fn handshake(&mut self, our_height: i32) -> io::Result<()> {
         self.send(&NetworkMessage::Version(our_version(our_height)))?;
         let mut got_version = false;
         let mut got_verack = false;

@@ -1,38 +1,45 @@
 //! itc-node — a standalone, instant-boot, trust-the-anchor ITC relay peer.
 //!
 //! Proof of Sovereignty: this Rust binary is a first-class peer of the C++ itcd
-//! node. It does NOT re-derive consensus and does NOT verify-then-boot. It boots
-//! instantly, TRUSTS THE ANCHOR CHAIN (mainnet, via the seed anchor), and earns
-//! its place by relaying.
+//! node. It boots instantly, TRUSTS THE ANCHOR CHAIN, syncs the header chain
+//! forward from the anchor, and then SEEDS those headers back to inbound peers —
+//! giving to the network, not leeching.
 //!
-//! Slice 2 (this commit) makes the protocol + handshake real: it connects to the
-//! seed anchor over the ITC P2P protocol, completes the version/verack handshake,
-//! pulls the first header batch, and runs the Proof-of-Prefix seam. Storage,
-//! full sync, serving, relay, and the ElectrumX wallet are the next slices.
+//! Slice 3 (this commit): real forward header sync (heights + 256-bit chainwork +
+//! the Proof-of-Prefix mismatch test) and a seeding server. Block bodies, storage
+//! (nedb-engine), tx relay, and the ElectrumX wallet are the next slices.
+//!
+//! Usage: `itc-node [LISTEN_PORT]`  (default LISTEN_PORT = 17333)
 
 mod anchor;
+mod chain;
 mod p2p;
+mod serve;
+mod sync;
+
+use std::sync::Arc;
 
 use itc_proto as proto;
-use itc_proto::seam::{self, SeamResult};
+
+use crate::chain::HeaderChain;
 
 fn main() {
-    // ── 1. Instant boot ──────────────────────────────────────────────────────
-    // No verify-once, no replay, no warm-boot window check. We come up at once.
+    let listen_port: u16 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(proto::DEFAULT_P2P_PORT);
+
     println!(
-        "itc-node {} — network=Main magic={:02x?} port={} genesis={}",
+        "itc-node {} — network=Main magic={:02x?} genesis={}",
         env!("CARGO_PKG_VERSION"),
         proto::MAGIC_MAIN,
-        proto::DEFAULT_P2P_PORT,
         proto::GENESIS_HASH_HEX,
     );
 
-    // ── 2. Trust the anchor chain ────────────────────────────────────────────
-    // Connect to the seed anchor and adopt its tip. The anchor's chain IS truth;
-    // we never independently finalize.
+    // ── 1. Instant boot: connect to the anchor, adopt its tip height ──────────
     let endpoint = proto::SEED_ANCHOR;
     println!("itc-node: connecting to anchor {endpoint} ...");
-    let (mut peer, tip) = match anchor::fetch_anchor_tip(endpoint, proto::MAGIC_MAIN) {
+    let (mut peer, anchor_tip) = match anchor::fetch_anchor_tip(endpoint, proto::MAGIC_MAIN) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("itc-node: anchor connect/handshake failed: {e} (is {endpoint} reachable?)");
@@ -40,45 +47,32 @@ fn main() {
         }
     };
     println!(
-        "itc-node: anchor handshake ok — peer ua={:?} version={} height={}",
+        "itc-node: anchor handshake ok — ua={:?} version={} height={}",
         peer.peer_user_agent, peer.peer_version, peer.peer_height
     );
-    println!("itc-node: trusting anchor tip — height {}", tip.height);
 
-    // ── 3. Pull the first header batch and run the Proof-of-Prefix seam ───────
-    // Our local tip starts at genesis; the seam tells us whether we're on the
-    // anchor's chain (Verified) or merely far behind (Pending).
-    let our_tip = proto::AnchorTip::genesis();
-    match peer.get_headers(vec![proto::genesis_hash_internal()]) {
-        Ok(headers) => {
-            println!("itc-node: received {} headers from the anchor", headers.len());
-            match seam::evaluate(&our_tip, &headers) {
-                SeamResult::Verified => println!(
-                    "itc-node[seam]: Proof-of-Prefix VERIFIED — our tip is on the anchor's chain; sync forward."
-                ),
-                SeamResult::Mismatch => println!(
-                    "itc-node[seam]: MISMATCH — our tip is NOT on the anchor's chain."
-                ),
-                SeamResult::Pending => println!(
-                    "itc-node[seam]: pending — anchor headers don't yet confirm our tip (normal when far behind)."
-                ),
-            }
-            if let Some(first) = headers.first() {
-                println!(
-                    "itc-node: first header hash {} (prev {})",
-                    proto::hashes::to_display_hex(&first.block_hash()),
-                    proto::hashes::to_display_hex(&first.prev_blockhash),
-                );
-            }
-            if let Some(last) = headers.last() {
-                println!(
-                    "itc-node: last header in batch {}",
-                    proto::hashes::to_display_hex(&last.block_hash())
-                );
-            }
-        }
-        Err(e) => println!("itc-node: getheaders failed: {e}"),
+    // ── 2. Forward header sync — build the chain, assign heights + chainwork ──
+    let mut chain = HeaderChain::new();
+    println!(
+        "itc-node: syncing headers from the anchor (target height {}) ...",
+        anchor_tip.height
+    );
+    if let Err(e) = sync::sync_headers(&mut peer, &mut chain) {
+        eprintln!("itc-node: header sync error: {e}");
     }
+    println!(
+        "itc-node: header sync done — tip height {} hash {}{}",
+        chain.tip_height(),
+        proto::hashes::to_display_hex(&chain.tip_hash()),
+        if chain.mismatch() { "   [PROOF-OF-PREFIX MISMATCH]" } else { "" },
+    );
 
-    println!("itc-node: slice-2 run complete (real handshake + headers + seam). Storage/sync/relay/wallet next.");
+    // ── 3. Seed: serve our headers to inbound peers (the valued-peer behavior) ─
+    let our_height = chain.tip_height();
+    let chain = Arc::new(chain);
+    let listen = format!("0.0.0.0:{listen_port}");
+    if let Err(e) = serve::serve(&listen, proto::MAGIC_MAIN, chain, our_height) {
+        eprintln!("itc-node: serve error on {listen}: {e}");
+        std::process::exit(1);
+    }
 }
