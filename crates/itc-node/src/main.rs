@@ -1,20 +1,18 @@
-//! itc-node — a standalone, instant-boot, trust-the-anchor ITC relay peer.
+//! itc-node — instant-boot, trust-the-anchor ITC relay peer (Proof of Sovereignty).
 //!
-//! Proof of Sovereignty: this Rust binary is a first-class peer of the C++ itcd
-//! node. It boots instantly, TRUSTS THE ANCHOR CHAIN, syncs the header chain
-//! forward from the anchor, and then SEEDS those headers back to inbound peers —
-//! giving to the network, not leeching.
+//! Slice 4 (this commit): NEDB-backed persistence. On boot the node loads any
+//! persisted header chain from nedb-engine (resume), trusts the anchor, syncs
+//! forward — persisting new headers + the tip into NEDB as it goes — then seeds
+//! the headers to inbound peers.
 //!
-//! Slice 3 (this commit): real forward header sync (heights + 256-bit chainwork +
-//! the Proof-of-Prefix mismatch test) and a seeding server. Block bodies, storage
-//! (nedb-engine), tx relay, and the ElectrumX wallet are the next slices.
-//!
-//! Usage: `itc-node [LISTEN_PORT]`  (default LISTEN_PORT = 17333)
+//! Usage: `itc-node [LISTEN_PORT]`   (env `ITC_NODE_DATADIR` sets the store path,
+//! default `./itc-node-data`).
 
 mod anchor;
 mod chain;
 mod p2p;
 mod serve;
+mod store;
 mod sync;
 
 use std::sync::Arc;
@@ -22,12 +20,14 @@ use std::sync::Arc;
 use itc_proto as proto;
 
 use crate::chain::HeaderChain;
+use crate::store::Store;
 
 fn main() {
     let listen_port: u16 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(proto::DEFAULT_P2P_PORT);
+    let datadir = std::env::var("ITC_NODE_DATADIR").unwrap_or_else(|_| "./itc-node-data".to_string());
 
     println!(
         "itc-node {} — network=Main magic={:02x?} genesis={}",
@@ -36,7 +36,30 @@ fn main() {
         proto::GENESIS_HASH_HEX,
     );
 
-    // ── 1. Instant boot: connect to the anchor, adopt its tip height ──────────
+    // ── 0. Open the NEDB store and resume any persisted chain (instant boot) ──
+    let store = match Store::open(&datadir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("itc-node: store open failed at {datadir}: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("itc-node: store open at {datadir} (engine head {})", store.head());
+
+    let mut chain = HeaderChain::new();
+    let persisted = store.load_headers_to_tip();
+    if !persisted.is_empty() {
+        for h in persisted {
+            chain.connect(h);
+        }
+        println!(
+            "itc-node: resumed from store — tip height {} hash {}",
+            chain.tip_height(),
+            proto::hashes::to_display_hex(&chain.tip_hash()),
+        );
+    }
+
+    // ── 1. Trust the anchor: connect + adopt its tip height ───────────────────
     let endpoint = proto::SEED_ANCHOR;
     println!("itc-node: connecting to anchor {endpoint} ...");
     let (mut peer, anchor_tip) = match anchor::fetch_anchor_tip(endpoint, proto::MAGIC_MAIN) {
@@ -51,23 +74,24 @@ fn main() {
         peer.peer_user_agent, peer.peer_version, peer.peer_height
     );
 
-    // ── 2. Forward header sync — build the chain, assign heights + chainwork ──
-    let mut chain = HeaderChain::new();
+    // ── 2. Forward header sync — persist each batch into NEDB ─────────────────
     println!(
-        "itc-node: syncing headers from the anchor (target height {}) ...",
+        "itc-node: syncing headers from {} (anchor target {}) ...",
+        chain.tip_height(),
         anchor_tip.height
     );
-    if let Err(e) = sync::sync_headers(&mut peer, &mut chain) {
+    if let Err(e) = sync::sync_headers(&mut peer, &mut chain, &store) {
         eprintln!("itc-node: header sync error: {e}");
     }
     println!(
-        "itc-node: header sync done — tip height {} hash {}{}",
+        "itc-node: sync done — tip height {} hash {}{} (engine head {})",
         chain.tip_height(),
         proto::hashes::to_display_hex(&chain.tip_hash()),
         if chain.mismatch() { "   [PROOF-OF-PREFIX MISMATCH]" } else { "" },
+        store.head(),
     );
 
-    // ── 3. Seed: serve our headers to inbound peers (the valued-peer behavior) ─
+    // ── 3. Seed headers to inbound peers (the valued-peer behavior) ───────────
     let our_height = chain.tip_height();
     let chain = Arc::new(chain);
     let listen = format!("0.0.0.0:{listen_port}");
