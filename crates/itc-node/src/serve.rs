@@ -1,23 +1,28 @@
-//! Seeding server — accept inbound peers and answer their `getheaders` from the
-//! chain we synced. This is the "valued peer" behavior: the node gives back.
-//!
-//! Slice 3 holds headers only (no block bodies yet), so we serve headers and
-//! ignore `getdata` for block bodies — block serving arrives with the storage /
-//! block-download slice. We do not fake having data we don't hold.
+//! Seeding server — accept inbound peers and answer their `getheaders` (from the
+//! synced chain) and `getdata` for block bodies (from the NEDB store). This is the
+//! "valued peer" behavior: the node gives back.
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use itc_proto::message::NetworkMessage;
+use itc_proto::hashes::to_internal_hex;
+use itc_proto::message::{self, NetworkMessage};
 
 use crate::chain::HeaderChain;
 use crate::p2p::Peer;
+use crate::store::Store;
 
-/// Bind `listen` and serve inbound peers from the (read-only) synced chain.
+/// Bind `listen` and serve inbound peers from the synced chain + NEDB store.
 /// Blocks, spawning a thread per connection.
-pub fn serve(listen: &str, magic: [u8; 4], chain: Arc<HeaderChain>, our_height: i32) -> io::Result<()> {
+pub fn serve(
+    listen: &str,
+    magic: [u8; 4],
+    chain: Arc<HeaderChain>,
+    store: Arc<Store>,
+    our_height: i32,
+) -> io::Result<()> {
     let listener = TcpListener::bind(listen)?;
     println!(
         "itc-node[serve]: seeding on {listen} — tip height {}",
@@ -27,12 +32,13 @@ pub fn serve(listen: &str, magic: [u8; 4], chain: Arc<HeaderChain>, our_height: 
         match conn {
             Ok(stream) => {
                 let chain = Arc::clone(&chain);
+                let store = Arc::clone(&store);
                 let who = stream
                     .peer_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| "?".to_string());
                 thread::spawn(move || {
-                    if let Err(e) = serve_peer(stream, magic, chain, our_height) {
+                    if let Err(e) = serve_peer(stream, magic, chain, store, our_height) {
                         println!("itc-node[serve]: peer {who} ended: {e}");
                     }
                 });
@@ -47,6 +53,7 @@ fn serve_peer(
     stream: TcpStream,
     magic: [u8; 4],
     chain: Arc<HeaderChain>,
+    store: Arc<Store>,
     our_height: i32,
 ) -> io::Result<()> {
     let mut peer = Peer::from_stream(stream, magic);
@@ -61,12 +68,23 @@ fn serve_peer(
                 let hs = chain.headers_after_locator(&gh.locator, &gh.hash_stop);
                 let n = hs.len();
                 peer.send(&NetworkMessage::Headers(hs))?;
-                println!("itc-node[serve]: served {n} headers to {:?}", peer.peer_user_agent);
+                println!("itc-node[serve]: served {n} headers");
+            }
+            NetworkMessage::GetData(invs) => {
+                let mut served = 0usize;
+                for inv in &invs {
+                    if inv.inv_type == message::INV_BLOCK {
+                        if let Some(raw) = store.get_block(&to_internal_hex(&inv.hash)) {
+                            peer.send(&NetworkMessage::Block(raw))?;
+                            served += 1;
+                        }
+                    }
+                }
+                if served > 0 {
+                    println!("itc-node[serve]: served {served} block(s)");
+                }
             }
             NetworkMessage::Ping(nonce) => peer.send(&NetworkMessage::Pong(nonce))?,
-            NetworkMessage::GetData(_) => {
-                // headers-only this slice; block-body serving lands with storage.
-            }
             _ => {}
         }
     }

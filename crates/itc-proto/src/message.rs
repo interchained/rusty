@@ -71,6 +71,8 @@ pub enum NetworkMessage {
     Headers(Vec<BlockHeader>),
     Inv(Vec<Inventory>),
     GetData(Vec<Inventory>),
+    /// A full block as raw consensus bytes (header + txs); relayed verbatim.
+    Block(Vec<u8>),
     MemPool,
     /// ITC-custom seam ("ppfx").
     ProofOfPrefix(ProofOfPrefix),
@@ -90,6 +92,7 @@ impl NetworkMessage {
             NetworkMessage::Headers(_) => "headers",
             NetworkMessage::Inv(_) => "inv",
             NetworkMessage::GetData(_) => "getdata",
+            NetworkMessage::Block(_) => "block",
             NetworkMessage::MemPool => "mempool",
             NetworkMessage::ProofOfPrefix(_) => "ppfx",
             NetworkMessage::Unknown { command, .. } => command.as_str(),
@@ -135,6 +138,7 @@ impl NetworkMessage {
                     consensus::put_hash(&mut v, &it.hash);
                 }
             }
+            NetworkMessage::Block(raw) => v.extend_from_slice(raw),
             NetworkMessage::ProofOfPrefix(p) => {
                 consensus::put_i32_le(&mut v, p.tip_height);
                 consensus::put_hash(&mut v, &p.tip_hash);
@@ -215,6 +219,7 @@ impl NetworkMessage {
                     NetworkMessage::GetData(items)
                 }
             }
+            "block" => NetworkMessage::Block(payload.to_vec()),
             "ppfx" => NetworkMessage::ProofOfPrefix(ProofOfPrefix {
                 tip_height: r.read_i32_le()?,
                 tip_hash: r.read_hash()?,

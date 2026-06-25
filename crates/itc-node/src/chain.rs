@@ -70,6 +70,14 @@ impl HeaderChain {
         self.height.contains_key(hash)
     }
 
+    /// Active-chain block hash at `height` (None if out of range).
+    pub fn hash_at_height(&self, height: i32) -> Option<[u8; 32]> {
+        if height < 0 {
+            return None;
+        }
+        self.active.get(height as usize).copied()
+    }
+
     /// Connect a header to the chain.
     pub fn connect(&mut self, h: BlockHeader) -> ConnectOutcome {
         let hh = h.block_hash();

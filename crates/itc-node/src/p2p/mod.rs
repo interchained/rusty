@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use itc_proto as proto;
 use itc_proto::block::BlockHeader;
-use itc_proto::message::{self, GetHeadersMessage, NetworkMessage, VersionMessage, HEADER_LEN};
+use itc_proto::message::{self, GetHeadersMessage, Inventory, NetworkMessage, VersionMessage, HEADER_LEN};
 
 /// A connected peer on the ITC network.
 pub struct Peer {
@@ -91,6 +91,23 @@ impl Peer {
             }
         }
         Err(io::Error::new(io::ErrorKind::Other, "no headers reply"))
+    }
+
+    /// Request a full block body by hash via `getdata(MSG_BLOCK)` and return the
+    /// raw block bytes (answering pings while waiting).
+    pub fn get_block(&mut self, hash: [u8; 32]) -> io::Result<Vec<u8>> {
+        self.send(&NetworkMessage::GetData(vec![Inventory {
+            inv_type: message::INV_BLOCK,
+            hash,
+        }]))?;
+        for _ in 0..256 {
+            match self.recv()? {
+                NetworkMessage::Block(raw) => return Ok(raw),
+                NetworkMessage::Ping(n) => self.send(&NetworkMessage::Pong(n))?,
+                _ => {}
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::Other, "no block reply"))
     }
 
     /// Send a framed message.
