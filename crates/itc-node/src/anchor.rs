@@ -1,16 +1,24 @@
-//! Trust-the-anchor: obtain the chain tip the node accepts as truth, without
-//! re-deriving consensus. v1 sources it from the seed anchor (P2P :17101) or
-//! ElectrumX (:50002) — cf. itcd's NEDB Proof-of-Prefix seam.
+//! Trust-the-anchor: connect to the seed anchor and adopt the chain tip we
+//! trust, without re-deriving consensus.
+
+use std::io;
 
 use itc_proto::AnchorTip;
 
-/// Return the tip the node trusts as the chain head.
+use crate::p2p::Peer;
+
+/// Connect to the anchor, complete the handshake, and adopt its reported height
+/// as our trusted anchor tip. Returns the live [`Peer`] (for header retrieval)
+/// and the [`AnchorTip`].
 ///
-/// STUB (plan task: "Implement instant boot ... trust the anchor chain tip").
-/// The next slice connects to `endpoint` over the ITC P2P handshake (or ElectrumX
-/// `blockchain.headers.subscribe`) and reads its best tip. Until then we return
-/// the genesis anchor so the node boots deterministically.
-pub fn trust_anchor_tip(endpoint: &str) -> AnchorTip {
-    let _ = endpoint; // wired in the anchor slice
-    AnchorTip::genesis()
+/// The height comes from the peer's `version` on the wire — a real read, not a
+/// guess. The tip *hash* is filled in as headers are synced forward (next slice);
+/// until then the anchor tip carries the trusted height with a zero hash.
+pub fn fetch_anchor_tip(endpoint: &str, magic: [u8; 4]) -> io::Result<(Peer, AnchorTip)> {
+    let peer = Peer::connect(endpoint, magic, 0)?;
+    let tip = AnchorTip {
+        height: peer.peer_height,
+        hash: [0u8; 32],
+    };
+    Ok((peer, tip))
 }
