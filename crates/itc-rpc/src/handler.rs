@@ -5,9 +5,15 @@ use std::sync::{Arc, Mutex};
 use revm::primitives::{Address, BlockEnv, Bytes, TransactTo, TxEnv, U256};
 use serde_json::{json, Value};
 
+use std::sync::Arc;
+
 use itc_evm::ItcEvm;
+use nedb_engine::Db;
 
 use crate::types::*;
+
+/// Shared NEDB handle for receipt lookups.
+pub type SharedDb = Arc<Db>;
 
 /// Shared EVM executor state (Mutex for single-writer consistency).
 pub type SharedEvm = Arc<Mutex<ItcEvm>>;
@@ -16,7 +22,7 @@ pub type SharedEvm = Arc<Mutex<ItcEvm>>;
 pub type SharedMempool = Arc<std::sync::Mutex<std::collections::VecDeque<crate::types::PendingTxRpc>>>;
 
 /// Dispatch a JSON-RPC request to the appropriate handler.
-pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch: u64) -> RpcResponse {
+pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch: u64, db: Option<&SharedDb>) -> RpcResponse {
     match method {
         // ── Identity ────────────────────────────────────────────────────────
         "eth_chainId" => {
@@ -154,10 +160,23 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
             RpcResponse::ok(id, synthetic_block(epoch))
         }
 
-        // ── Transaction lookup (minimal) ──────────────────────────────────────
+        // ── Transaction lookup ─────────────────────────────────────────────────
         "eth_getTransactionReceipt" => {
-            // In v1, we don't persist receipts separately. Return null for now;
-            // full receipt storage lands with the mempool / L2 block production slice.
+            let tx_hash_str = match extract_str(params, 0) {
+                Some(s) => s.to_string(),
+                None => return RpcResponse::invalid_params(id, "missing tx hash"),
+            };
+            // Normalize: strip 0x prefix for NEDB lookup key
+            let key = if tx_hash_str.starts_with("0x") {
+                tx_hash_str.clone()
+            } else {
+                format!("0x{tx_hash_str}")
+            };
+            if let Some(db) = db {
+                if let Some(node) = db.get("l2_receipts", &key) {
+                    return RpcResponse::ok(id, node.data.clone());
+                }
+            }
             RpcResponse::ok(id, Value::Null)
         }
         "eth_getTransactionByHash" => {

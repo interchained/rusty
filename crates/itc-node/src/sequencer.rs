@@ -22,6 +22,7 @@ use revm::primitives::{Address, B256, U256};
 use serde_json::json;
 
 use itc_evm::ItcEvm;
+use itc_oracle::ExitScanner;
 
 /// L2 block time in seconds.
 pub const BLOCK_TIME_SECS: u64 = 5;
@@ -68,11 +69,13 @@ pub struct Sequencer {
     mempool: Mempool,
     epoch: Arc<AtomicU64>,
     db: Arc<Db>,
+    exit_scanner: ExitScanner,
 }
 
 impl Sequencer {
     pub fn new(evm: Arc<Mutex<ItcEvm>>, mempool: Mempool, epoch: Arc<AtomicU64>, db: Arc<Db>) -> Self {
-        Sequencer { evm, mempool, epoch, db }
+        let exit_scanner = ExitScanner::new(Arc::clone(&db));
+        Sequencer { evm, mempool, epoch, db, exit_scanner }
     }
 
     /// Spawn the sequencer background thread.
@@ -155,6 +158,9 @@ impl Sequencer {
             "[SEQ] block={block_num} txs={} gas={total_gas} head={head}",
             receipts.len()
         );
+
+        // Process any exits that have reached their confirmation threshold.
+        self.exit_scanner.process_epoch(block_num);
     }
 
     fn persist_receipts(&self, receipts: &[TxReceipt], block_num: u64) {
