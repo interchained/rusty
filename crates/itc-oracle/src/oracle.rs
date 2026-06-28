@@ -13,6 +13,12 @@ use itc_evm::NedbState;
 use crate::deposit::{scan_block_for_deposits, BridgeDeposit};
 use crate::{DEPOSIT_CONFIRMATIONS, SATS_TO_WEI_FACTOR};
 
+/// Default bridge governance fee: 500 basis points = 5%.
+/// Send 1 ITC → 0.95 aITC minted; 0.05 ITC stays locked in the bridge address.
+pub const DEFAULT_FEE_BPS: u64 = 500;
+/// Maximum allowed fee: 1000 BPS = 10%.
+pub const MAX_FEE_BPS: u64 = 1_000;
+
 /// Oracle configuration — all tweakable via environment or config.
 #[derive(Clone, Debug)]
 pub struct OracleConfig {
@@ -21,15 +27,17 @@ pub struct OracleConfig {
     pub bridge_lock_hash160: [u8; 20],
     /// Required L1 confirmations before minting aITC.
     pub confirmations: i32,
+    /// Governance fee in basis points (1 BPS = 0.01%).
+    /// `ITC_BRIDGE_FEE_BPS` env var. Default: 500 (5%).
+    /// Fee stays locked in the bridge address — it is NOT released; it accrues
+    /// as governance revenue to be swept by the operator via a separate process.
+    pub fee_bps: u64,
 }
 
 impl OracleConfig {
-    /// Load from environment. Panics if ITC_BRIDGE_HASH160 is not set or invalid.
+    /// Load from environment.
     pub fn from_env() -> OracleConfig {
         let hash160_hex = std::env::var("ITC_BRIDGE_HASH160").unwrap_or_else(|_| {
-            // Default: zero hash160 (deposits to this won't match anything useful,
-            // but the oracle won't crash — it just won't detect any deposits until
-            // ITC_BRIDGE_HASH160 is configured).
             "0000000000000000000000000000000000000000".to_string()
         });
         let bytes = hex::decode(&hash160_hex).unwrap_or_default();
@@ -37,13 +45,27 @@ impl OracleConfig {
         if bytes.len() == 20 {
             hash160.copy_from_slice(&bytes);
         }
+        let fee_bps = std::env::var("ITC_BRIDGE_FEE_BPS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FEE_BPS)
+            .min(MAX_FEE_BPS);
         OracleConfig {
             bridge_lock_hash160: hash160,
             confirmations: std::env::var("ITC_BRIDGE_CONFIRMATIONS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEPOSIT_CONFIRMATIONS),
+            fee_bps,
         }
+    }
+
+    /// Apply the governance fee to a gross amount in satoshis.
+    /// Returns (net_sats, fee_sats).
+    pub fn apply_fee(&self, gross_sats: u64) -> (u64, u64) {
+        let fee = (gross_sats * self.fee_bps + 9_999) / 10_000; // ceiling division
+        let net = gross_sats.saturating_sub(fee);
+        (net, fee)
     }
 }
 
@@ -110,12 +132,19 @@ impl DepositOracle {
                 break; // not yet confirmed
             }
             let p = self.pending.pop_front().unwrap();
-            match self.mint(&p.deposit) {
+            let (net_sats, fee_sats) = self.config.apply_fee(p.deposit.amount_sats);
+            let fee_pct = self.config.fee_bps as f64 / 100.0;
+            match self.mint_net(&p.deposit, net_sats) {
                 Ok(()) => {
                     println!(
-                        "[ORACLE] ✅ minted {} aITC wei to 0x{} (L1 tx {})",
-                        sats_to_wei(p.deposit.amount_sats),
+                        "[ORACLE] ✅ minted {} aITC wei to 0x{} \
+                         (gross={} fee={}@{:.2}% net={} L1 tx {})",
+                        sats_to_wei(net_sats),
                         hex::encode(p.deposit.aitc_address),
+                        p.deposit.amount_sats,
+                        fee_sats,
+                        fee_pct,
+                        net_sats,
                         p.deposit.l1_txid_display,
                     );
                     minted.push(p.deposit);
@@ -128,14 +157,14 @@ impl DepositOracle {
         minted
     }
 
-    /// Mint native aITC to the depositor's EVM address.
+    /// Mint `net_sats` (post-fee) aITC to the depositor's EVM address.
     ///
-    /// Directly credits `evm_accounts[address].balance` in NEDB.
-    /// `caused_by: [L1_txid]` gives the provenance chain.
-    fn mint(&self, deposit: &BridgeDeposit) -> Result<(), String> {
+    /// The governance fee is already deducted — `net_sats` is what the user receives.
+    /// The fee portion stays locked in `BRIDGE_LOCK_ADDRESS` on L1 and accrues there.
+    fn mint_net(&self, deposit: &BridgeDeposit, net_sats: u64) -> Result<(), String> {
         let state = NedbState::new(Arc::clone(&self.db));
         let addr = Address::from(deposit.aitc_address);
-        let amount_wei = sats_to_wei(deposit.amount_sats);
+        let amount_wei = sats_to_wei(net_sats);
         let l1_txid_hex = hex::encode(deposit.l1_txid);
         let caused_by = vec![l1_txid_hex];
 
@@ -150,8 +179,8 @@ impl DepositOracle {
 
         let new_balance = existing + amount_wei;
 
-        // Write directly to NEDB — this is the "native mint" operation.
-        // Not an EVM transaction — the oracle credits the balance at the protocol level.
+        // Write directly to NEDB — native mint at the protocol level.
+        // caused_by = [L1_txid] links the aITC balance to the ITC mainnet tx.
         let id = NedbState::addr_key(&addr);
         let data = json!({
             "balance": NedbState::u256_to_hex(new_balance),
@@ -159,6 +188,8 @@ impl DepositOracle {
             "code_hash": NedbState::hash_key(&revm::primitives::KECCAK_EMPTY),
             "origin": "bridge_deposit",
             "l1_txid": hex::encode(deposit.l1_txid),
+            "gross_sats": deposit.amount_sats,
+            "net_sats": net_sats,
         });
         state
             .db

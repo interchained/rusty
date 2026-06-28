@@ -16,7 +16,7 @@ pub mod deposit;
 pub mod oracle;
 pub mod utxo;
 
-pub use oracle::{DepositOracle, OracleConfig};
+pub use oracle::{DepositOracle, OracleConfig, DEFAULT_FEE_BPS, MAX_FEE_BPS};
 pub use utxo::UtxoMirror;
 
 /// ITC mainnet satoshis per coin.
