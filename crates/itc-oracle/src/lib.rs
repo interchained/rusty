@@ -13,9 +13,11 @@
 //! © Interchained LLC × Claude Sonnet 4.6
 
 pub mod deposit;
+pub mod exit;
 pub mod oracle;
 pub mod utxo;
 
+pub use exit::{ExitScanner, EXIT_ADDRESS, EXIT_CONFIRMATIONS};
 pub use oracle::{DepositOracle, OracleConfig, DEFAULT_FEE_BPS, MAX_FEE_BPS};
 pub use utxo::UtxoMirror;
 

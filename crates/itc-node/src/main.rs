@@ -33,7 +33,7 @@ use std::sync::Mutex;
 
 use itc_anchor::{AnchorConfig, AnchorPoster};
 use itc_evm::ItcEvm;
-use itc_oracle::{DepositOracle, OracleConfig, UtxoMirror};
+use itc_oracle::{DepositOracle, ExitScanner, OracleConfig, UtxoMirror};
 use itc_rpc::RpcServer;
 
 use crate::sequencer::{new_mempool, Sequencer};
@@ -117,6 +117,9 @@ fn main() {
     // on L2 automatically. The oracle processes each block as it is downloaded.
     let mut utxo_mirror = UtxoMirror::open(Arc::clone(&store.db));
     println!("itc-node[oracle]: UTXO mirror armed — scanning all P2PKH outputs");
+    // Exit scanner — processes aITC burns on L2 and releases ITC on L1
+    let exit_scanner = ExitScanner::new(Arc::clone(&store.db));
+    println!("itc-node[oracle]: exit scanner armed (ITC_BRIDGE_RELEASE_WIF for live releases)");
 
     // ── 4. Block body download ────────────────────────────────────────────────
     // Download full block bodies for every height we have a header for.
