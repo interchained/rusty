@@ -81,6 +81,21 @@ impl<'a> Reader<'a> {
         let b = self.read_bytes(len)?;
         Ok(String::from_utf8_lossy(b).into_owned())
     }
+    /// Peek at the next byte without advancing.
+    pub fn peek_u8(&self) -> Result<u8> {
+        if self.pos >= self.buf.len() {
+            return Err(Error::UnexpectedEof);
+        }
+        Ok(self.buf[self.pos])
+    }
+    /// Return a slice of all remaining bytes (without advancing).
+    pub fn peek_remaining(&self) -> &'a [u8] {
+        &self.buf[self.pos..]
+    }
+    /// Advance by `n` bytes without reading.
+    pub fn skip(&mut self, n: usize) {
+        self.pos = (self.pos + n).min(self.buf.len());
+    }
 }
 
 // ---- writers (append to a Vec<u8>) ----

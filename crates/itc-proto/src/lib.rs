@@ -11,7 +11,10 @@ pub mod block;
 pub mod consensus;
 pub mod hashes;
 pub mod message;
+pub mod script;
 pub mod seam;
+pub mod signer_util;
+pub mod tx;
 pub mod work;
 
 pub use seam::{AnchorTip, SeamResult};

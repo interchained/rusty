@@ -30,6 +30,7 @@ use itc_proto as proto;
 
 use itc_anchor::{AnchorConfig, AnchorPoster};
 use itc_evm::ItcEvm;
+use itc_oracle::{DepositOracle, OracleConfig};
 use itc_rpc::RpcServer;
 
 use crate::chain::HeaderChain;
@@ -105,7 +106,18 @@ fn main() {
         store.head(),
     );
 
-    // ── 3. Block body download ────────────────────────────────────────────────
+    // ── 3. Deposit oracle setup ───────────────────────────────────────────────
+    // The oracle processes each block as it's downloaded, detecting bridge deposits
+    // and minting native aITC after DEPOSIT_CONFIRMATIONS confirmations.
+    // Configure ITC_BRIDGE_HASH160 (20-byte hex) to activate live deposits.
+    let oracle_config = OracleConfig::from_env();
+    let mut oracle = DepositOracle::new(oracle_config, Arc::clone(&store.db));
+    println!(
+        "itc-node[oracle]: deposit scanner armed (ITC_BRIDGE_HASH160={})",
+        hex::encode(itc_oracle::OracleConfig::from_env().bridge_lock_hash160)
+    );
+
+    // ── 4. Block body download ────────────────────────────────────────────────
     // Download full block bodies for every height we have a header for.
     // This is what makes us a full peer: we can serve blocks, not just headers.
     println!(

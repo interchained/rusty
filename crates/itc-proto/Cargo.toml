@@ -1,10 +1,13 @@
 [package]
 name = "itc-proto"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "ITC network protocol layer (a fork of the Bitcoin P2P wire protocol, owned in-tree) — real wire serialization, message types, block header, and the NEDB Proof-of-Prefix seam."
+description = "ITC network protocol layer — wire protocol, block/tx parsing, script analysis, address derivation."
 
 [dependencies]
-sha2 = "0.10"
+sha2      = "0.10"
+sha3      = "0.10"   # keccak256 for ETH address derivation
+secp256k1 = { version = "0.27", features = ["rand-std"] }
+hex       = "0.4"
