@@ -123,6 +123,20 @@ impl HeaderChain {
         }
     }
 
+    /// Hash at a given height on the active chain, or None if out of range.
+    pub fn active_hash_at(&self, height: i32) -> Option<[u8; 32]> {
+        self.active.get(height as usize).copied()
+    }
+
+    /// Hashes for [start..=end] on the active chain (inclusive, capped at tip).
+    pub fn active_range(&self, start: i32, end: i32) -> Vec<[u8; 32]> {
+        let end = end.min(self.tip_height());
+        if start < 0 || start > end {
+            return Vec::new();
+        }
+        self.active[(start as usize)..=(end as usize)].to_vec()
+    }
+
     /// Standard Bitcoin block locator from the active tip (last 10 by one, then
     /// doubling steps, always ending at genesis).
     pub fn block_locator(&self) -> Vec<[u8; 32]> {

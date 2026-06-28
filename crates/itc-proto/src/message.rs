@@ -5,7 +5,7 @@
 //! Frame layout: magic[4] | command[12, null-padded] | length[4 LE] |
 //! checksum[4] (first 4 of sha256d(payload)) | payload[length].
 
-use crate::block::BlockHeader;
+use crate::block::{Block, BlockHeader};
 use crate::consensus::{self, Error, Reader, Result};
 use crate::hashes;
 
@@ -72,6 +72,8 @@ pub enum NetworkMessage {
     Inv(Vec<Inventory>),
     GetData(Vec<Inventory>),
     MemPool,
+    /// A full block body (header + transactions). Received via `getdata` INV_BLOCK.
+    Block(Block),
     /// ITC-custom seam ("ppfx").
     ProofOfPrefix(ProofOfPrefix),
     /// A command whose envelope we parsed but whose payload we don't decode.
@@ -91,6 +93,7 @@ impl NetworkMessage {
             NetworkMessage::Inv(_) => "inv",
             NetworkMessage::GetData(_) => "getdata",
             NetworkMessage::MemPool => "mempool",
+            NetworkMessage::Block(_) => "block",
             NetworkMessage::ProofOfPrefix(_) => "ppfx",
             NetworkMessage::Unknown { command, .. } => command.as_str(),
         }
@@ -135,6 +138,7 @@ impl NetworkMessage {
                     consensus::put_hash(&mut v, &it.hash);
                 }
             }
+            NetworkMessage::Block(b) => v.extend_from_slice(&b.raw),
             NetworkMessage::ProofOfPrefix(p) => {
                 consensus::put_i32_le(&mut v, p.tip_height);
                 consensus::put_hash(&mut v, &p.tip_hash);
@@ -213,6 +217,13 @@ impl NetworkMessage {
                     NetworkMessage::Inv(items)
                 } else {
                     NetworkMessage::GetData(items)
+                }
+            }
+            "block" => {
+                let raw = payload.to_vec();
+                match Block::from_raw(raw.clone()) {
+                    Some(b) => NetworkMessage::Block(b),
+                    None => NetworkMessage::Unknown { command: "block".to_string(), payload: raw },
                 }
             }
             "ppfx" => NetworkMessage::ProofOfPrefix(ProofOfPrefix {

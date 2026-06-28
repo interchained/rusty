@@ -104,6 +104,11 @@ impl Store {
         hex_decode(node.data.get("raw")?.as_str()?)
     }
 
+    /// Return true if we already have this block body persisted.
+    pub fn has_block(&self, id: &str) -> bool {
+        self.db.get(COLL_BLOCKS, id).is_some()
+    }
+
     /// Persist the chain tip (height + hash).
     pub fn put_tip(&self, height: i32, hash: &[u8; 32]) -> io::Result<()> {
         let data = json!({ "height": height, "hash": to_internal_hex(hash) });

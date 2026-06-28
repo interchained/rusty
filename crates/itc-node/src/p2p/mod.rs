@@ -6,8 +6,8 @@ use std::net::TcpStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use itc_proto as proto;
-use itc_proto::block::BlockHeader;
-use itc_proto::message::{self, GetHeadersMessage, NetworkMessage, VersionMessage, HEADER_LEN};
+use itc_proto::block::{Block, BlockHeader};
+use itc_proto::message::{self, GetHeadersMessage, Inventory, NetworkMessage, VersionMessage, HEADER_LEN, INV_BLOCK};
 
 /// A connected peer on the ITC network.
 pub struct Peer {
@@ -91,6 +91,40 @@ impl Peer {
             }
         }
         Err(io::Error::new(io::ErrorKind::Other, "no headers reply"))
+    }
+
+    /// Request up to `hashes.len()` full blocks via `getdata` and collect the
+    /// `block` responses. Answers pings while waiting. Returns however many blocks
+    /// were received before the peer stops sending (e.g. at tip or timeout).
+    pub fn request_blocks(&mut self, hashes: &[[u8; 32]]) -> io::Result<Vec<Block>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let items: Vec<Inventory> = hashes
+            .iter()
+            .map(|h| Inventory { inv_type: INV_BLOCK, hash: *h })
+            .collect();
+        self.send(&NetworkMessage::GetData(items))?;
+        let mut out = Vec::with_capacity(hashes.len());
+        // We wait for up to hashes.len() block messages, with generous timeouts.
+        let _ = self.stream.set_read_timeout(Some(Duration::from_secs(120)));
+        for _ in 0..hashes.len() * 4 {
+            match self.recv() {
+                Ok(NetworkMessage::Block(b)) => {
+                    out.push(b);
+                    if out.len() == hashes.len() {
+                        break;
+                    }
+                }
+                Ok(NetworkMessage::Ping(n)) => self.send(&NetworkMessage::Pong(n))?,
+                Ok(NetworkMessage::Inv(_)) => {} // ignore concurrent announcements
+                Ok(_) => {}
+                Err(_) => break, // timeout or disconnect
+            }
+        }
+        // Restore normal timeout.
+        let _ = self.stream.set_read_timeout(Some(Duration::from_secs(30)));
+        Ok(out)
     }
 
     /// Send a framed message.
