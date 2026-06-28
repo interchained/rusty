@@ -1,0 +1,22 @@
+[package]
+name = "itc-anchor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ITC-L2 L1 anchor — builds and broadcasts OP_RETURN sovereignty proofs to ITC mainnet."
+
+[dependencies]
+itc-proto = { path = "../itc-proto" }
+
+# secp256k1 — P2PKH signing for the anchor transaction (Bitcoin-compatible)
+secp256k1 = { version = "0.27", features = ["rand-std"] }
+
+# sha2 + ripemd for hash160 (P2PKH address derivation)
+sha2 = "0.10"
+ripemd = "0.1"
+
+# bs58 — base58check encode/decode for WIF key parsing
+bs58 = "0.5"
+
+hex = "0.4"

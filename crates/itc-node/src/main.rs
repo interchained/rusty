@@ -1,5 +1,10 @@
 //! itc-node — ITC-L2 full peer node (Proof of Sovereignty).
 //!
+//! Slice 7: L1 anchor OP_RETURN poster. After syncing, a background thread fires
+//! every ITC_ANCHOR_INTERVAL epochs and broadcasts an OP_RETURN tx to ITC L1
+//! carrying the NEDB Merkle head — the sovereignty proof that the L2 state is
+//! anchored on-chain. Dry-run if ITC_ANCHOR_WIF is not set.
+//!
 //! Slice 5: full block body download + peer citizenship. The node now:
 //!   - Resumes persisted headers + block bodies from NEDB on boot (instant start)
 //!   - Syncs all headers from the anchor
@@ -22,6 +27,8 @@ mod sync;
 use std::sync::Arc;
 
 use itc_proto as proto;
+
+use itc_anchor::{AnchorConfig, AnchorPoster};
 
 use crate::chain::HeaderChain;
 use crate::store::Store;
@@ -111,7 +118,18 @@ fn main() {
     }
     println!("itc-node: engine head after sync: {}", store.head());
 
-    // ── 4. Serve — headers + block bodies to inbound peers ───────────────────
+    // ── 4. L1 anchor poster — sovereignty proof on ITC mainnet ───────────────
+    // Spawns a background thread that fires every ITC_ANCHOR_INTERVAL epochs and
+    // broadcasts an OP_RETURN tx to ITC L1 carrying the NEDB Merkle head.
+    // Dry-run if ITC_ANCHOR_WIF is not set (logs what would be posted).
+    {
+        let anchor_config = AnchorConfig::from_env(endpoint, proto::MAGIC_MAIN);
+        let anchor_db = Arc::clone(&store);
+        AnchorPoster::new(anchor_config, anchor_db.db.clone()).spawn();
+        println!("itc-node[anchor]: poster spawned (set ITC_ANCHOR_WIF to go live)");
+    }
+
+    // ── 5. Serve — headers + block bodies to inbound peers ───────────────────
     let our_height = chain.tip_height();
     let chain = Arc::new(chain);
     let store = Arc::new(store);

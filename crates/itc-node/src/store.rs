@@ -26,7 +26,7 @@ const COLL_INDEX: &str = "index";
 type PutOp = (String, String, serde_json::Value, Vec<String>, Option<String>, Option<String>);
 
 pub struct Store {
-    db: Arc<Db>,
+    pub db: Arc<Db>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> io::Error {
