@@ -29,6 +29,8 @@ use std::sync::Arc;
 use itc_proto as proto;
 
 use itc_anchor::{AnchorConfig, AnchorPoster};
+use itc_evm::ItcEvm;
+use itc_rpc::RpcServer;
 
 use crate::chain::HeaderChain;
 use crate::store::Store;
@@ -129,7 +131,16 @@ fn main() {
         println!("itc-node[anchor]: poster spawned (set ITC_ANCHOR_WIF to go live)");
     }
 
-    // ── 5. Serve — headers + block bodies to inbound peers ───────────────────
+    // ── 5. eth_* JSON-RPC server ──────────────────────────────────────────────
+    // MetaMask-compatible endpoint. Bind: ITC_RPC_ADDR (default 0.0.0.0:8545).
+    {
+        let rpc_addr = std::env::var("ITC_RPC_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:8545".to_string());
+        let evm = ItcEvm::new(Arc::clone(&store.db));
+        RpcServer::new(evm).spawn(rpc_addr);
+    }
+
+    // ── 6. Serve — headers + block bodies to inbound peers ───────────────────
     let our_height = chain.tip_height();
     let chain = Arc::new(chain);
     let store = Arc::new(store);

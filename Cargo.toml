@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/itc-proto", "crates/itc-node", "crates/itc-evm", "crates/itc-anchor"]
+members = ["crates/itc-proto", "crates/itc-node", "crates/itc-evm", "crates/itc-anchor", "crates/itc-rpc"]
 
 [workspace.package]
 edition = "2021"
