@@ -1,0 +1,23 @@
+[package]
+name = "itc-evm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ITC-L2 EVM execution engine — revm backed by NEDB state storage."
+
+[dependencies]
+# revm 3.x — production-grade EVM implementation (used by Foundry, Reth, etc.)
+# Database/DatabaseRef traits + CacheDB are in revm::db.
+# If this needs to be upgraded to revm 10+ Builder API, see executor.rs notes.
+revm = { version = "3", default-features = false, features = ["std"] }
+
+# NEDB engine — the state backend (accounts, storage, code collections)
+nedb-engine = { git = "https://github.com/Eth-Interchained/nedb", package = "nedb-engine" }
+
+serde_json = "1"
+hex = "0.4"
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
