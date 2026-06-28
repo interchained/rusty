@@ -12,6 +12,9 @@ use crate::types::*;
 /// Shared EVM executor state (Mutex for single-writer consistency).
 pub type SharedEvm = Arc<Mutex<ItcEvm>>;
 
+/// Shared mempool handle (used by eth_sendRawTransaction to submit txs to sequencer).
+pub type SharedMempool = Arc<std::sync::Mutex<std::collections::VecDeque<crate::types::PendingTxRpc>>>;
+
 /// Dispatch a JSON-RPC request to the appropriate handler.
 pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch: u64) -> RpcResponse {
     match method {

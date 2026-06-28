@@ -20,6 +20,7 @@
 mod anchor;
 mod chain;
 mod p2p;
+mod sequencer;
 mod serve;
 mod store;
 mod sync;
@@ -28,10 +29,14 @@ use std::sync::Arc;
 
 use itc_proto as proto;
 
+use std::sync::Mutex;
+
 use itc_anchor::{AnchorConfig, AnchorPoster};
 use itc_evm::ItcEvm;
 use itc_oracle::{DepositOracle, OracleConfig, UtxoMirror};
 use itc_rpc::RpcServer;
+
+use crate::sequencer::{new_mempool, Sequencer};
 
 use crate::chain::HeaderChain;
 use crate::store::Store;
@@ -159,14 +164,30 @@ fn main() {
         println!("itc-node[anchor]: poster spawned (set ITC_ANCHOR_WIF to go live)");
     }
 
-    // ── 5. eth_* JSON-RPC server ──────────────────────────────────────────────
-    // MetaMask-compatible endpoint. Bind: ITC_RPC_ADDR (default 0.0.0.0:8545).
-    {
+    // ── 5. EVM + sequencer + eth_* JSON-RPC ──────────────────────────────────
+    // Shared EVM executor, mempool, and epoch counter wired across RPC + sequencer.
+    let evm_shared = Arc::new(Mutex::new(ItcEvm::new(Arc::clone(&store.db))));
+    let mempool = new_mempool();
+    let epoch = {
+        let rpc_server = RpcServer::new_shared(
+            Arc::clone(&evm_shared),
+            Arc::clone(&mempool),
+        );
+        let epoch = rpc_server.epoch_counter();
         let rpc_addr = std::env::var("ITC_RPC_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:8545".to_string());
-        let evm = ItcEvm::new(Arc::clone(&store.db));
-        RpcServer::new(evm).spawn(rpc_addr);
-    }
+        rpc_server.spawn_shared(rpc_addr);
+        epoch
+    };
+
+    // L2 block sequencer — ticks every 5s, drains mempool, executes txs, persists receipts
+    Sequencer::new(
+        Arc::clone(&evm_shared),
+        Arc::clone(&mempool),
+        Arc::clone(&epoch),
+        Arc::clone(&store.db),
+    ).spawn();
+    println!("itc-node[seq]: L2 sequencer started (5s blocks)");
 
     // ── 6. Serve — headers + block bodies to inbound peers ───────────────────
     let our_height = chain.tip_height();

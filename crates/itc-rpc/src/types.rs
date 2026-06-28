@@ -52,6 +52,14 @@ impl RpcResponse {
     }
 }
 
+/// A pending transaction submitted via eth_sendRawTransaction, queued for the sequencer.
+#[derive(Clone, Debug)]
+pub struct PendingTxRpc {
+    pub raw: Vec<u8>,
+    pub tx_hash: [u8; 32],
+    pub from: [u8; 20],
+}
+
 // ── Ethereum hex helpers ──────────────────────────────────────────────────────
 
 /// Encode a u64 as an Ethereum hex quantity string (e.g. "0x1a").

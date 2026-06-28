@@ -32,7 +32,7 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
-    /// Create a new RPC server wrapping the given EVM executor.
+    /// Create a new RPC server wrapping the given EVM executor (owned, single-use).
     pub fn new(evm: ItcEvm) -> Self {
         RpcServer {
             evm: Arc::new(Mutex::new(evm)),
@@ -40,9 +40,26 @@ impl RpcServer {
         }
     }
 
-    /// Shared epoch counter — the L2 block production slice will advance this.
+    /// Create a new RPC server with a pre-shared EVM (used by the sequencer too).
+    pub fn new_shared(evm: SharedEvm, _mempool: crate::handler::SharedMempool) -> Self {
+        RpcServer {
+            evm,
+            epoch: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Shared epoch counter — advanced by the sequencer each block.
     pub fn epoch_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.epoch)
+    }
+
+    /// Spawn the RPC server in a background thread (shared EVM variant).
+    pub fn spawn_shared(self, addr: String) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            if let Err(e) = self.serve(&addr) {
+                eprintln!("itc-rpc: server error: {e}");
+            }
+        })
     }
 
     /// Bind and serve in the calling thread. Spawns one thread per request.
