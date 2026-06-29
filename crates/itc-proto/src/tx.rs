@@ -65,7 +65,7 @@ impl Tx {
             let script_len = r.read_compact_size()? as usize;
             let script_sig = r.read_bytes(script_len)?;
             let sequence = r.read_u32_le()?;
-            inputs.push(TxIn { prev_txid, prev_vout, script_sig, sequence });
+            inputs.push(TxIn { prev_txid, prev_vout, script_sig: script_sig.to_vec(), sequence });
         }
 
         // Outputs
@@ -75,7 +75,7 @@ impl Tx {
             let value = r.read_u64_le()?;
             let script_len = r.read_compact_size()? as usize;
             let script_pubkey = r.read_bytes(script_len)?;
-            outputs.push(TxOut { value, script_pubkey });
+            outputs.push(TxOut { value, script_pubkey: script_pubkey.to_vec() });
         }
 
         // Witness data (skip if segwit)
