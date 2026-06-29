@@ -54,15 +54,36 @@ fn extract_deposit(tx: &Tx, bridge_lock_hash160: &[u8; 20], l1_height: i32) -> O
         return None;
     }
 
-    // Extract the sender's pubkey from the first non-coinbase P2PKH input.
-    // A coinbase input has prev_txid = [0; 32] and prev_vout = 0xffffffff.
-    let aitc_address = tx.inputs.iter().find_map(|inp| {
-        if inp.prev_txid == [0u8; 32] {
-            return None; // coinbase
+    // Check for an OP_RETURN output carrying the EVM destination address.
+    // Format: 0x6a (OP_RETURN) 0x14 (PUSH 20) <20-byte EVM address>
+    // This allows wallets to specify a MetaMask-compatible destination (m/44'/60'/0'/0/0)
+    // independent of the L1 sender's key path.
+    let op_return_dest: Option<[u8; 20]> = tx.outputs.iter().find_map(|o| {
+        let s = &o.script_pubkey;
+        if s.len() == 22 && s[0] == 0x6a && s[1] == 0x14 {
+            let mut addr = [0u8; 20];
+            addr.copy_from_slice(&s[2..22]);
+            Some(addr)
+        } else {
+            None
         }
-        let pubkey = p2pkh_scriptsig_pubkey(&inp.script_sig)?;
-        pubkey_to_eth_address(&pubkey)
-    })?;
+    });
+
+    // Resolve the aITC mint destination:
+    // 1. OP_RETURN destination (Ethereum BIP44 path, MetaMask compatible) — preferred
+    // 2. Derived from sender's L1 pubkey — fallback for legacy / non-Elara senders
+    let aitc_address = if let Some(dest) = op_return_dest {
+        dest
+    } else {
+        // Extract the sender's pubkey from the first non-coinbase P2PKH input.
+        tx.inputs.iter().find_map(|inp| {
+            if inp.prev_txid == [0u8; 32] {
+                return None; // coinbase
+            }
+            let pubkey = p2pkh_scriptsig_pubkey(&inp.script_sig)?;
+            pubkey_to_eth_address(&pubkey)
+        })?
+    };
 
     let l1_txid_display = {
         let mut d = tx.txid;
