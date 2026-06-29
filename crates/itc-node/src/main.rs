@@ -66,6 +66,38 @@ fn main() {
         }
     };
     println!("itc-node: store open at {datadir} (engine head {})", store.head());
+    // ── Boot config banner ────────────────────────────────────────────────────
+    {
+        let mask = |v: &str| -> String {
+            if v.is_empty() || v.starts_with('(') { return v.to_string(); }
+            if v.len() <= 8 { return "*".repeat(v.len()); }
+            format!("{}...{}", &v[..4], &v[v.len()-4..])
+        };
+        let get = |k: &str, def: &str| std::env::var(k).unwrap_or_else(|_| def.to_string());
+        let wif      = get("ITC_ANCHOR_WIF",            "(not set — anchor dry-run)");
+        let rpc_user = get("ITC_L1_RPC_USER",           "(not set)");
+        let rpc_pass = get("ITC_L1_RPC_PASS",           "(not set)");
+
+        println!("┌─────────────────────────────────────────────────────────┐");
+        println!("│  ⛓  ITC-L2   Rusty v{}   chain_id=17101              │", env!("CARGO_PKG_VERSION"));
+        println!("├─────────────────────────────────────────────────────────┤");
+        println!("│  datadir      {}",    get("ITC_NODE_DATADIR",   "./itc-node-data"));
+        println!("│  p2p-port     {}",    get("ITC_P2P_PORT",       "17333 (default)"));
+        println!("│  rpc-addr     {}",    get("ITC_RPC_ADDR",       "0.0.0.0:8545"));
+        println!("├─────────────────────────────────────────────────────────┤");
+        println!("│  bridge       {}",    get("ITC_BRIDGE_ADDRESS", "(not set)"));
+        println!("│  fee-bps      {}",    get("ITC_BRIDGE_FEE_BPS", "500"));
+        println!("│  confirms     {}",    get("ITC_BRIDGE_CONFIRMATIONS", "6"));
+        println!("│  start-h      {}",    get("ITC_ORACLE_START_HEIGHT", "1 (full scan)"));
+        println!("├─────────────────────────────────────────────────────────┤");
+        println!("│  anchor-wif   {}", mask(&wif));
+        println!("│  l1-rpc-url   {}", get("ITC_L1_RPC_URL", "(not set)"));
+        println!("│  l1-rpc-user  {}", mask(&rpc_user));
+        println!("│  l1-rpc-pass  {}", mask(&rpc_pass));
+        println!("└─────────────────────────────────────────────────────────┘");
+        println!();
+    }
+
 
     // ── Graceful shutdown: Ctrl-C / SIGTERM → flush tip then exit ────────────
     let shutdown = Arc::new(AtomicBool::new(false));
