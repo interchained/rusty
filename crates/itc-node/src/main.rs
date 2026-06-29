@@ -26,6 +26,7 @@ mod store;
 mod sync;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use itc_proto as proto;
 
@@ -66,6 +67,19 @@ fn main() {
     };
     println!("itc-node: store open at {datadir} (engine head {})", store.head());
 
+    // ── Graceful shutdown: Ctrl-C / SIGTERM → flush tip then exit ────────────
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || {
+            // Set flag; the main loop sees it between batches and exits cleanly.
+            if !flag.load(Ordering::Relaxed) {
+                eprintln!("\nitc-node: shutdown signal — flushing after current batch...");
+                flag.store(true, Ordering::SeqCst);
+            }
+        }).expect("Failed to set Ctrl-C handler");
+    }
+
     // Resume from persisted tip — O(1) vs O(648k) header replay.
     // The block locator sends the tip hash first; if the peer recognises it the
     // sync finishes in a single round-trip.  Falls back to genesis on reorg.
@@ -101,7 +115,7 @@ fn main() {
         chain.tip_height(),
         anchor_tip.height
     );
-    if let Err(e) = sync::sync_headers(&mut peer, &mut chain, &store) {
+    if let Err(e) = sync::sync_headers(&mut peer, &mut chain, &store, &shutdown) {
         eprintln!("itc-node: header sync error: {e}");
     }
     println!(
@@ -132,13 +146,27 @@ fn main() {
         "itc-node: downloading block bodies (tip height {}) — this may take a while ...",
         chain.tip_height()
     );
-    match sync::sync_blocks(&mut peer, &chain, &store, oracle_start_height) {
+    // Flush tip in case shutdown was requested during header sync
+    if shutdown.load(Ordering::Relaxed) {
+        let _ = store.put_tip(chain.tip_height(), &chain.tip_hash());
+        eprintln!("itc-node: tip flushed at height {} — clean shutdown", chain.tip_height());
+        return;
+    }
+
+    match sync::sync_blocks(&mut peer, &chain, &store, oracle_start_height, &shutdown) {
         Ok((downloaded, skipped)) => println!(
             "itc-node: block download done — {downloaded} downloaded, {skipped} already had"
         ),
         Err(e) => eprintln!("itc-node: block download error (partial progress saved): {e}"),
     }
     println!("itc-node: engine head after sync: {}", store.head());
+
+    // Flush tip on block-sync shutdown
+    if shutdown.load(Ordering::Relaxed) {
+        let _ = store.put_tip(chain.tip_height(), &chain.tip_hash());
+        eprintln!("itc-node: tip flushed at height {} — clean shutdown", chain.tip_height());
+        return;
+    }
 
     // ── 3b. UTXO mirror scan — process all downloaded blocks ─────────────────
     // Walk height 1 → tip, run each raw block through the mirror. Happens once

@@ -20,5 +20,6 @@ itc-rpc    = { path = "../itc-rpc" }
 itc-evm    = { path = "../itc-evm" }
 itc-oracle = { path = "../itc-oracle" }
 hex        = "0.4"
+ctrlc      = "3"
 rlp        = "0.5"
 revm       = { version = "3", default-features = false, features = ["std"] }

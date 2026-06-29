@@ -1,6 +1,7 @@
 //! Sync — header sync and full block body download from the anchor peer.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use itc_proto::block::BlockHeader;
 use itc_proto::hashes::to_internal_hex;
@@ -16,10 +17,11 @@ const BLOCK_BATCH: i32 = 16;
 // ── Header sync ──────────────────────────────────────────────────────────────
 
 /// Sync headers forward from `peer` into `chain`, persisting into `store`.
-pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store) -> io::Result<()> {
+pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store, shutdown: &AtomicBool) -> io::Result<()> {
     let target = peer.peer_height;
     let mut rounds = 0u32;
     loop {
+        if shutdown.load(Ordering::Relaxed) { return Ok(()); }
         rounds += 1;
         let locator = chain.block_locator();
         let batch = peer.get_headers(locator)?;
@@ -75,7 +77,7 @@ pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store) -> 
 /// Walks the active chain from height 1 to tip, batching getdata requests.
 /// Already-stored blocks are skipped (idempotent, resume-safe).
 /// Returns (downloaded, skipped) counts.
-pub fn sync_blocks(peer: &mut Peer, chain: &HeaderChain, store: &Store, start_height: i32) -> io::Result<(u64, u64)> {
+pub fn sync_blocks(peer: &mut Peer, chain: &HeaderChain, store: &Store, start_height: i32, shutdown: &AtomicBool) -> io::Result<(u64, u64)> {
     let tip = chain.tip_height();
     if tip < 1 {
         return Ok((0, 0));
@@ -85,6 +87,7 @@ pub fn sync_blocks(peer: &mut Peer, chain: &HeaderChain, store: &Store, start_he
     let mut height = start_height.max(1);
 
     while height <= tip {
+        if shutdown.load(Ordering::Relaxed) { break; }
         let batch_end = (height + BLOCK_BATCH - 1).min(tip);
         let hashes = chain.active_range(height, batch_end);
 
