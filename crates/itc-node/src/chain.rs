@@ -54,6 +54,40 @@ impl HeaderChain {
         }
     }
 
+
+    /// Resume from a trusted persisted tip without replaying all 600k+ headers.
+    ///
+    /// Allocates the `active` chain index with the tip hash at the correct slot.
+    /// Ancestor slots are zero (unknown) — the block locator sends the tip hash
+    /// first; if the peer recognizes it (which it will on the real chain) it
+    /// replies with 0 new headers and sync finishes instantly. Falls back to
+    /// genesis slot if the tip moved (reorg), which triggers a full catch-up.
+    ///
+    /// Memory: ~32 bytes × height ≈ 20 MB for a 648k-height chain. Acceptable.
+    pub fn resume_from_tip(height: i32, hash: [u8; 32]) -> HeaderChain {
+        let genesis = itc_proto::genesis_hash_internal();
+        let mut height_map = HashMap::new();
+        height_map.insert(genesis, 0i32);
+        height_map.insert(hash, height);
+        let mut work_map = HashMap::new();
+        work_map.insert(genesis, U256::ZERO);
+
+        // active[h] = block hash at height h. Unknown ancestors filled with zeros.
+        let mut active = vec![[0u8; 32]; (height + 1) as usize];
+        active[0] = genesis;
+        active[height as usize] = hash;
+
+        HeaderChain {
+            headers: HashMap::new(),
+            height: height_map,
+            work: work_map,
+            active,
+            tip_hash: hash,
+            tip_work: U256::ZERO, // unknown — only used for fork detection, safe to zero
+            mismatch: false,
+        }
+    }
+
     pub fn tip_height(&self) -> i32 {
         self.active.len() as i32 - 1
     }

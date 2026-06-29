@@ -43,20 +43,26 @@ pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store) -> 
         store.put_tip(chain.tip_height(), &chain.tip_hash())?;
 
         let after = chain.tip_height();
-        println!(
-            "itc-node[sync]: +{} headers — tip now {after} / anchor {target}",
-            to_persist.len()
-        );
+        // Single-line overwriting progress bar
+        {
+            let pct = if target > 0 { (after as f64 / target as f64 * 100.0) as u32 } else { 0 };
+            let filled = ((pct as usize) * 20 / 100).min(20);
+            let bar = "█".repeat(filled) + &"░".repeat(20 - filled);
+            eprint!("\r  [headers] {after:>7}/{target} [{bar}] {pct:>3}%   ");
+        }
         if after == before {
             break;
         }
         if batch.len() < 2000 {
-            break; // short batch → at the tip
+            eprintln!(); // end progress bar line
+            break;
         }
         if target > 0 && after >= target {
+            eprintln!(); // end progress bar line
             break;
         }
         if rounds > 100_000 {
+            eprintln!(); // end progress bar line
             break;
         }
     }

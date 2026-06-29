@@ -66,18 +66,19 @@ fn main() {
     };
     println!("itc-node: store open at {datadir} (engine head {})", store.head());
 
-    let mut chain = HeaderChain::new();
-    let persisted = store.load_headers_to_tip();
-    if !persisted.is_empty() {
-        for h in persisted {
-            chain.connect(h);
-        }
+    // Resume from persisted tip — O(1) vs O(648k) header replay.
+    // The block locator sends the tip hash first; if the peer recognises it the
+    // sync finishes in a single round-trip.  Falls back to genesis on reorg.
+    let mut chain = if let Some((tip_h, tip_hash)) = store.get_tip() {
         println!(
-            "itc-node: resumed from store — tip height {} hash {}",
-            chain.tip_height(),
-            proto::hashes::to_display_hex(&chain.tip_hash()),
+            "itc-node: resumed from store — tip height {tip_h} hash {}",
+            proto::hashes::to_display_hex(&tip_hash),
         );
-    }
+        HeaderChain::resume_from_tip(tip_h, tip_hash)
+    } else {
+        println!("itc-node: no persisted tip — syncing from genesis");
+        HeaderChain::new()
+    };
 
     // ── 1. Trust the anchor ───────────────────────────────────────────────────
     let endpoint = proto::SEED_ANCHOR;
