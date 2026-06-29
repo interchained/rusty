@@ -108,8 +108,17 @@ impl Sequencer {
             mem.drain(..n).collect()
         };
 
+        // ── Status line every 10 blocks (fires even on empty blocks) ────────────
+        if block_num % 10 == 0 {
+            let l1_height: i64 = self.db
+                .get("index", "tip")
+                .and_then(|n| n.data.get("height").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            println!("[L1] Block: {l1_height}  |  [L2] Block: {block_num}");
+        }
+
         if pending.is_empty() {
-            // Empty block — still advance epoch and anchor
+            // Empty block — still advance epoch
             self.epoch.store(block_num, Ordering::SeqCst);
             return;
         }
