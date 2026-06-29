@@ -5,7 +5,7 @@
 //!
 //! Bind address: `ITC_RPC_ADDR` env var, default `0.0.0.0:8545`.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -89,7 +89,7 @@ impl RpcServer {
             thread::spawn(move || {
                 let response = handle_request(&mut request, &evm, epoch, db.as_ref());
                 let body = serde_json::to_string(&response).unwrap_or_default();
-                let resp = Response::from_reader(Cursor::new(body.clone()))
+                let resp = Response::from_data(body.clone())
                     .with_header(
                         Header::from_bytes("Content-Type", "application/json").unwrap()
                     )
