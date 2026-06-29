@@ -21,3 +21,4 @@ itc-evm    = { path = "../itc-evm" }
 itc-oracle = { path = "../itc-oracle" }
 hex        = "0.4"
 rlp        = "0.5"
+revm       = { version = "3", default-features = false, features = ["std"] }
