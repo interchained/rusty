@@ -79,6 +79,7 @@ impl Store {
     }
 
     /// Load a header (and its height) by block-hash hex id.
+    #[allow(dead_code)]
     pub fn get_header(&self, id: &str) -> Option<(BlockHeader, i32)> {
         let node = self.db.get(COLL_HEADERS, id)?;
         let hdr_hex = node.data.get("hdr")?.as_str()?;
@@ -134,6 +135,7 @@ impl Store {
 
     /// Walk from the persisted tip back to genesis, returning headers in chain
     /// order (height 1 .. tip). Empty if nothing is persisted yet.
+    #[allow(dead_code)]
     pub fn load_headers_to_tip(&self) -> Vec<BlockHeader> {
         let genesis = itc_proto::genesis_hash_internal();
         let mut out = Vec::new();
