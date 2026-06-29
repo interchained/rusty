@@ -309,26 +309,10 @@ impl DepositOracle {
         let amount_wei = sats_to_wei(net_sats);
         let new_balance = current_balance.checked_add(amount_wei).ok_or("balance overflow")?;
 
-        // ── Write new balance to EVM state ────────────────────────────────────
-        let caused_by = vec![l1_txid_hex.clone()];
-        let account_data = json!({
-            "balance":    NedbState::u256_to_hex(new_balance),
-            "nonce":      0u64,
-            "code_hash":  NedbState::hash_key(&revm::primitives::KECCAK_EMPTY),
-            "origin":     "bridge_deposit",
-            "l1_txid":    l1_txid_hex,
-            "gross_sats": deposit.amount_sats,
-            "net_sats":   net_sats,
-            "caused_by":  caused_by,
-        });
-        let _ = self.db.put(COLL_ACCOUNTS, &account_id, account_data, vec![l1_txid_hex.clone()], None, None);
-
-        // ── Record in oracle_minted (idempotency + audit trail) ───────────────
-        // Write AFTER the balance update so a crash between the two leaves the
-        // balance updated and the mint guard unset — on retry the balance read
-        // returns the new value and we'd double-write the same balance (safe).
-        // If we wrote the guard first and crashed, the deposit would be silently
-        // skipped — that is the worse outcome, so guard goes last.
+        // ── Write guard FIRST (crash-safe ordering) ───────────────────────────
+        // Guard before balance: if we crash between guard-write and balance-write
+        // the user gets an under-mint (deposit appears minted but balance not
+        // updated). Under-mint is recoverable by operator; double-mint is not.
         let _ = self.db.put(
             COLL_ORACLE_MINTED, &minted_key,
             json!({
@@ -338,8 +322,38 @@ impl DepositOracle {
                 "aitc_address": hex::encode(deposit.aitc_address),
                 "minted_at_l1": deposit.l1_height,
                 "caused_by":    [l1_txid_hex],
+                "balance_written": false,   // set to true after balance write
             }),
-            vec![l1_txid_hex],
+            vec![l1_txid_hex.clone()],
+            None, None,
+        );
+
+        // ── Write new balance to EVM state ────────────────────────────────────
+        let account_data = json!({
+            "balance":    NedbState::u256_to_hex(new_balance),
+            "nonce":      0u64,
+            "code_hash":  NedbState::hash_key(&revm::primitives::KECCAK_EMPTY),
+            "origin":     "bridge_deposit",
+            "l1_txid":    l1_txid_hex,
+            "gross_sats": deposit.amount_sats,
+            "net_sats":   net_sats,
+            "caused_by":  [l1_txid_hex.clone()],
+        });
+        let _ = self.db.put(COLL_ACCOUNTS, &account_id, account_data, vec![l1_txid_hex.clone()], None, None);
+
+        // Mark balance as written (allows operator tooling to detect partial mints)
+        let _ = self.db.put(
+            COLL_ORACLE_MINTED, &minted_key,
+            json!({
+                "l1_txid":       l1_txid_hex,
+                "net_sats":      net_sats,
+                "gross_sats":    deposit.amount_sats,
+                "aitc_address":  hex::encode(deposit.aitc_address),
+                "minted_at_l1":  deposit.l1_height,
+                "caused_by":     [l1_txid_hex.clone()],
+                "balance_written": true,
+            }),
+            vec![l1_txid_hex.clone()],
             None, None,
         );
 
