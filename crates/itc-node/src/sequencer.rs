@@ -108,17 +108,16 @@ impl Sequencer {
             mem.drain(..n).collect()
         };
 
-        // ── Status line every 10 blocks (fires even on empty blocks) ────────────
-        if block_num % 10 == 0 {
-            let l1_height: i64 = self.db
+        // Live status line —  overwrites, no log spam
+        {
+            let l1_h: i64 = self.db
                 .get("index", "tip")
                 .and_then(|n| n.data.get("height").and_then(|v| v.as_i64()))
                 .unwrap_or(0);
-            println!("[L1] Block: {l1_height}  |  [L2] Block: {block_num}");
+            eprint!("\r  [L1] {l1_h}  |  [L2] {block_num}   ");
         }
 
         if pending.is_empty() {
-            // Empty block — still advance epoch
             self.epoch.store(block_num, Ordering::SeqCst);
             return;
         }
@@ -166,9 +165,10 @@ impl Sequencer {
         self.persist_receipts(&receipts, block_num);
 
         let head = self.db.head();
+        eprintln!(); // advance past the \r status line
         println!(
-            "[SEQ] block={block_num} txs={} gas={total_gas} head={head}",
-            receipts.len()
+            "[SEQ] L2 block={block_num} txs={} gas={total_gas} head={}",
+            receipts.len(), &head[..16.min(head.len())]
         );
 
         // Process any exits that have reached their confirmation threshold.
