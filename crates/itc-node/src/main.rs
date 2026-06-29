@@ -42,9 +42,10 @@ use crate::chain::HeaderChain;
 use crate::store::Store;
 
 fn main() {
-    let listen_port: u16 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
+    // Use ITC_P2P_PORT to avoid conflict with interchainedd (17333) on same host.
+    let listen_port: u16 = std::env::var("ITC_P2P_PORT")
+        .ok().and_then(|s| s.parse().ok())
+        .or_else(|| std::env::args().nth(1).and_then(|s| s.parse().ok()))
         .unwrap_or(proto::DEFAULT_P2P_PORT);
     let datadir = std::env::var("ITC_NODE_DATADIR")
         .unwrap_or_else(|_| "./itc-node-data".to_string());
@@ -153,6 +154,35 @@ fn main() {
         Err(e) => eprintln!("itc-node: block download error (partial progress saved): {e}"),
     }
     println!("itc-node: engine head after sync: {}", store.head());
+
+    // ── 3b. Bridge deposit oracle scan ───────────────────────────────────────
+    // Walk oracle_start_height..tip, calling DepositOracle::process_block on each.
+    // Idempotent (oracle_minted guard) and reboot-safe (oracle_pending in NEDB).
+    {
+        use itc_oracle::{DepositOracle, OracleConfig};
+        let oracle_cfg = OracleConfig::from_env();
+        let mut oracle = DepositOracle::new(oracle_cfg, Arc::clone(&store.db));
+        let tip = chain.tip_height();
+        println!("itc-node[oracle]: scanning {oracle_start_height}..{tip} for bridge deposits...");
+        let mut total_minted = 0usize;
+        for h in oracle_start_height..=tip {
+            if shutdown.load(Ordering::Relaxed) { break; }
+            if let Some(hash) = chain.active_hash_at(h) {
+                let hash_hex = itc_proto::hashes::to_internal_hex(&hash);
+                if let Some(raw) = store.get_block(&hash_hex) {
+                    let minted = oracle.process_block(&raw, h);
+                    total_minted += minted.len();
+                    for d in &minted {
+                        println!(
+                            "[ORACLE] minted deposit from {} at L1 height {} → 0x{}",
+                            d.l1_txid_display, h, hex::encode(d.aitc_address),
+                        );
+                    }
+                }
+            }
+        }
+        println!("itc-node[oracle]: scan done — {total_minted} deposit(s) confirmed");
+    }
 
     // Flush tip on block-sync shutdown
     if shutdown.load(Ordering::Relaxed) {
