@@ -132,21 +132,31 @@ fn main() {
         println!();
     }
 
-    // ── Graceful shutdown: Ctrl-C / SIGTERM → flush tip then exit ────────────
+    // ── Graceful shutdown: Ctrl-C / SIGTERM → guaranteed flush then exit ────
     let shutdown = Arc::new(AtomicBool::new(false));
+    // live_tip is updated after every put_tip so the handler flushes the real value.
+    let live_tip: Arc<std::sync::Mutex<(i32, [u8; 32])>> =
+        Arc::new(std::sync::Mutex::new((0, [0u8; 32])));
     {
-        let flag = Arc::clone(&shutdown);
+        let flag     = Arc::clone(&shutdown);
+        let tip_ref  = Arc::clone(&live_tip);
+        let flush_db = Arc::clone(&store.db);
         ctrlc::set_handler(move || {
-            if !flag.load(Ordering::Relaxed) {
-                eprintln!("\nitc-node: shutdown signal — flushing and exiting...");
-                flag.store(true, Ordering::SeqCst);
-                // Give the current batch ~800ms to call put_tip, then exit hard.
-                std::thread::sleep(std::time::Duration::from_millis(800));
+            if !flag.swap(true, Ordering::SeqCst) {
+                eprintln!("\nitc-node: shutdown signal received");
+                // Read the most recent tip and flush it to NEDB
+                let (h, hash) = *tip_ref.lock().unwrap();
+                if h > 0 {
+                    let s = crate::store::Store::from_arc_db(Arc::clone(&flush_db));
+                    let _ = s.put_tip(h, &hash);
+                    eprintln!("itc-node: tip flushed at height {h}");
+                }
+                // Brief pause for NEDB fsync
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 eprintln!("itc-node: bye.");
                 std::process::exit(0);
             } else {
-                // Second Ctrl-C: immediate exit
-                std::process::exit(1);
+                std::process::exit(1); // second Ctrl-C: immediate
             }
         }).expect("Failed to set Ctrl-C handler");
     }
@@ -214,6 +224,7 @@ fn main() {
     // Flush tip in case shutdown was requested during header sync
     if shutdown.load(Ordering::Relaxed) {
         let _ = store.put_tip(chain.tip_height(), &chain.tip_hash());
+        *live_tip.lock().unwrap() = (chain.tip_height(), chain.tip_hash());
         eprintln!("itc-node: tip flushed at height {} — clean shutdown", chain.tip_height());
         return;
     }
@@ -224,6 +235,7 @@ fn main() {
         ),
         Err(e) => eprintln!("itc-node: block download error (partial progress saved): {e}"),
     }
+    *live_tip.lock().unwrap() = (chain.tip_height(), chain.tip_hash());
     println!("itc-node: engine head after sync: {}", store.head());
 
     // ── 3b. Bridge deposit oracle scan ───────────────────────────────────────
@@ -258,6 +270,7 @@ fn main() {
     // Flush tip on block-sync shutdown
     if shutdown.load(Ordering::Relaxed) {
         let _ = store.put_tip(chain.tip_height(), &chain.tip_hash());
+        *live_tip.lock().unwrap() = (chain.tip_height(), chain.tip_hash());
         eprintln!("itc-node: tip flushed at height {} — clean shutdown", chain.tip_height());
         return;
     }
