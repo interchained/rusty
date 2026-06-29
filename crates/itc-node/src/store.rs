@@ -35,6 +35,7 @@ fn err<E: std::fmt::Display>(e: E) -> io::Error {
 
 impl Store {
     /// Wrap an already-open NEDB instance (e.g. for background threads).
+    #[allow(dead_code)]
     pub fn from_arc_db(db: Arc<Db>) -> Store {
         Store { db }
     }
