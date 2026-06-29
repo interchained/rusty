@@ -57,6 +57,31 @@ fn main() {
         proto::GENESIS_HASH_HEX,
     );
 
+
+    // ── Replay mode: wipe L2 derived state, keep L1 headers+blocks ───────────
+    let replay = std::env::args().any(|a| a == "--replay")
+        || std::env::var("ITC_ORACLE_REPLAY").is_ok();
+    if replay {
+        println!("itc-node[replay]: wiping L2 state — L1 headers+blocks preserved");
+        // L2 collections (NEDB stores each collection as a subdirectory)
+        let l2_collections = [
+            "evm_accounts", "evm_storage", "evm_code",
+            "l2_receipts",
+            "oracle_minted", "oracle_pending", "oracle_state",
+        ];
+        for coll in &l2_collections {
+            let path = format!("{datadir}/{coll}");
+            if std::path::Path::new(&path).exists() {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(_)  => println!("itc-node[replay]: ✓ wiped {coll}"),
+                    Err(e) => eprintln!("itc-node[replay]: failed to wipe {coll}: {e}"),
+                }
+            }
+        }
+        println!("itc-node[replay]: clean slate — oracle will re-derive from L1 blocks");
+        println!();
+    }
+
     // ── 0. Open NEDB store + resume persisted chain (instant boot) ────────────
     let store = match Store::open(&datadir) {
         Ok(s) => s,
