@@ -1,0 +1,172 @@
+name: Release — rusty-interchained
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: itc-node
+  CRATE_NAME: rusty-interchained
+
+jobs:
+  # ── Linux x86_64 (native) ────────────────────────────────────────────────
+  build-linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin itc-node
+      - name: Rename
+        run: mv target/release/itc-node target/release/rusty-interchained-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: target/release/rusty-interchained-linux-x86_64
+
+  # ── Linux ARM64 (cross) ──────────────────────────────────────────────────
+  build-linux-aarch64:
+    name: Linux ARM64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install cross-linker
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Configure linker
+        run: |
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+      - name: Build
+        run: cargo build --release --bin itc-node --target aarch64-unknown-linux-gnu
+      - name: Rename
+        run: mv target/aarch64-unknown-linux-gnu/release/itc-node target/release/rusty-interchained-linux-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64
+          path: target/release/rusty-interchained-linux-aarch64
+
+  # ── Windows x86_64 ───────────────────────────────────────────────────────
+  build-windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin itc-node
+      - name: Rename
+        shell: bash
+        run: mv target/release/itc-node.exe target/release/rusty-interchained-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: target/release/rusty-interchained-windows-x86_64.exe
+
+  # ── macOS Apple Silicon ──────────────────────────────────────────────────
+  build-macos-aarch64:
+    name: macOS Apple Silicon
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin itc-node
+      - name: Rename
+        run: mv target/release/itc-node target/release/rusty-interchained-macos-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-aarch64
+          path: target/release/rusty-interchained-macos-aarch64
+
+  # ── macOS Intel ──────────────────────────────────────────────────────────
+  build-macos-x86_64:
+    name: macOS Intel
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build
+        run: cargo build --release --bin itc-node --target x86_64-apple-darwin
+      - name: Rename
+        run: mv target/x86_64-apple-darwin/release/itc-node target/release/rusty-interchained-macos-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: target/release/rusty-interchained-macos-x86_64
+
+  # ── GitHub Release + crates.io publish ──────────────────────────────────
+  release:
+    name: Create Release
+    needs:
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-windows-x86_64
+      - build-macos-aarch64
+      - build-macos-x86_64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create checksums
+        working-directory: dist
+        run: |
+          find . -type f -not -name '*.sha256' | while read f; do
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Extract release notes
+        id: notes
+        run: |
+          # Use RELEASE_NOTES.md from repo root if present
+          if [ -f RELEASE_NOTES.md ]; then
+            echo "notes_file=RELEASE_NOTES.md" >> $GITHUB_OUTPUT
+          else
+            echo "notes_file=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Rusty Interchained ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/**/*
+            dist/SHA256SUMS
+          draft: false
+          prerelease: false
+
+      # ── Publish to crates.io ─────────────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish leaf crates first, then the binary
+          cargo publish -p itc-proto  --no-verify || true
+          sleep 15
+          cargo publish -p itc-evm   --no-verify || true
+          sleep 15
+          cargo publish -p itc-oracle --no-verify || true
+          sleep 15
+          cargo publish -p itc-anchor --no-verify || true
+          sleep 15
+          cargo publish -p itc-rpc   --no-verify || true
+          sleep 15
+          cargo publish -p itc-node  --no-verify
