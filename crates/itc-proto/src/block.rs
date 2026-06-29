@@ -48,7 +48,7 @@ impl BlockHeader {
 /// A full block: decoded header plus the complete raw P2P wire bytes
 /// (header || varint_tx_count || serialized txns). Stored raw so we can
 /// persist and re-serve without re-encoding; slice 6 (EVM) decodes the txns.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     /// Decoded header — for hash/height lookup and PoW verification.
     pub header: BlockHeader,

@@ -4,8 +4,6 @@
 //!   1. Is this output a P2PKH to the bridge lock address?
 //!   2. What is the sender's compressed secp256k1 pubkey (from the spending input)?
 
-use crate::signer_util::hash160;
-
 // ── Script templates ──────────────────────────────────────────────────────────
 
 /// Check if a scriptPubKey is P2PKH paying to `hash160`.
@@ -122,7 +120,7 @@ fn read_push_len(script: &[u8], pos: &mut usize) -> Option<usize> {
 /// y² = x³ + 7 (mod p)
 fn uncompress_pubkey(compressed: &[u8]) -> Option<Vec<u8>> {
     use secp256k1::{PublicKey, Secp256k1};
-    let secp = Secp256k1::new();
+    let _secp = Secp256k1::new();
     let pk = PublicKey::from_slice(compressed).ok()?;
     let uncompressed = pk.serialize_uncompressed();
     Some(uncompressed.to_vec())

@@ -8,7 +8,7 @@
 //! in a segwit input, and the deposit is silently ignored (correct behaviour:
 //! we only support P2PKH deposits in v1).
 
-use crate::consensus::{Error, Reader, Result};
+use crate::consensus::{Reader, Result};
 use crate::hashes::sha256d;
 
 /// A decoded transaction input.
@@ -135,7 +135,7 @@ pub fn decode_block_txs(block_raw: &[u8]) -> Vec<Tx> {
         let slice = &block_raw[80 + 1 + pos..]; // approximate
         match Tx::decode(slice) {
             Ok(tx) => {
-                let consumed = slice.len() - slice[..].len().min(slice.len()); // naive
+                let _consumed = slice.len() - slice[..].len().min(slice.len()); // naive
                 // Advance reader by consuming txid field to keep sync
                 // Since Tx::decode doesn't tell us bytes consumed precisely, use a
                 // re-encode approach: skip by re-reading the tx from a fresh reader.
@@ -147,7 +147,6 @@ pub fn decode_block_txs(block_raw: &[u8]) -> Vec<Tx> {
                 let _ = advance_past_tx(&mut r);
             }
         }
-        let _ = consumed; // suppress warning
     }
     txs
 }
@@ -166,9 +165,9 @@ pub fn decode_block_txs_v2(block_raw: &[u8]) -> Vec<Tx> {
     let mut txs = Vec::with_capacity(tx_count.min(10_000));
     for _ in 0..tx_count {
         // Slice from the current reader position
-        let remaining = r.remaining();
-        let offset = block_raw.len() - remaining - 80;
-        let slice = &block_raw[80 + varint_len(tx_count as u64) + offset..];
+        let _remaining = r.remaining();
+        let _offset = block_raw.len() - _remaining - 80;
+        let _slice = &block_raw[80 + varint_len(tx_count as u64) + _offset..];
         // actually just use the remaining bytes from the reader
         let avail = r.peek_remaining();
         match Tx::decode(avail) {
