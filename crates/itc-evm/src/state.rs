@@ -1,10 +1,13 @@
 //! NedbState — revm::DatabaseRef backed by NEDB.
 //!
 //! Implements the read side of the EVM state interface:
-//!   basic_ref(addr)        → AccountInfo {balance, nonce, code_hash}
-//!   code_by_hash_ref(h)    → Bytecode
-//!   storage_ref(addr,slot) → U256
-//!   block_hash_ref(n)      → B256  (zero for now; real L2 block hashes in slice 7)
+//!   basic(addr)           → AccountInfo {balance, nonce, code_hash}
+//!   code_by_hash(h)       → Bytecode
+//!   storage(addr,slot)    → U256
+//!   block_hash(n)         → B256  (zero for now; real L2 block hashes in slice 7)
+//!
+//! Method names follow the revm 3.x `DatabaseRef` trait surface (no `_ref`
+//! suffix — that variant was introduced in revm 4+).
 //!
 //! Write side: after revm executes a transaction, `commit_changes()` receives
 //! the dirty account map from revm's CacheDB and persists every touched account
@@ -21,7 +24,10 @@ use nedb_engine::Db;
 use revm::primitives::{
     AccountInfo, Address, Bytecode, Bytes, B256, U256, KECCAK_EMPTY,
 };
-use revm::DatabaseRef;
+// `DatabaseRef` lives in `revm::primitives::db` (re-exported via `revm::db::*`).
+// It is NOT re-exported at the crate root in revm 3.x, so we import the long
+// path here.
+use revm::db::DatabaseRef;
 use serde_json::json;
 
 pub const COLL_ACCOUNTS: &str = "evm_accounts";
@@ -115,9 +121,12 @@ impl NedbState {
     /// Flush all dirty accounts + storage from a completed revm execution into
     /// NEDB. Every write carries `caused_by: [tx_hash]` — the provenance chain
     /// that makes this EVM's state transitions causally traceable.
+    ///
+    /// `changes` uses `revm::primitives::HashMap` (re-export of `hashbrown::HashMap`),
+    /// which is the same type as the `state` field of `ResultAndState`.
     pub fn commit_changes(
         &self,
-        changes: &std::collections::HashMap<Address, revm::primitives::Account>,
+        changes: &revm::primitives::HashMap<Address, revm::primitives::Account>,
         tx_hash: B256,
     ) {
         let caused_by = vec![Self::hash_key(&tx_hash)];
@@ -139,7 +148,8 @@ impl NedbState {
             if let Some(code) = &info.code {
                 if !code.is_empty() {
                     let code_id = Self::hash_key(&info.code_hash);
-                    let code_data = json!({ "bytecode": hex::encode(code.bytecode()) });
+                    // revm 3.x: Bytecode has `bytes()` returning `&Bytes` (NOT `bytecode()`).
+                    let code_data = json!({ "bytecode": hex::encode(code.bytes()) });
                     let _ = self.db.put(COLL_CODE, &code_id, code_data, vec![], None, None);
                 }
             }
@@ -166,11 +176,15 @@ impl NedbState {
 }
 
 // ── DatabaseRef (read-only revm interface) ────────────────────────────────────
+//
+// revm 3.x defines DatabaseRef methods as `basic`, `code_by_hash`, `storage`,
+// `block_hash` (no `_ref` suffix). The `_ref` variants were introduced in
+// revm 4+ where both immutable and mutable variants live on the same trait.
 
 impl DatabaseRef for NedbState {
     type Error = String;
 
-    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, String> {
+    fn basic(&self, address: Address) -> Result<Option<AccountInfo>, String> {
         let id = Self::addr_key(&address);
         let node = match self.db.get(COLL_ACCOUNTS, &id) {
             None => return Ok(None),
@@ -198,11 +212,11 @@ impl DatabaseRef for NedbState {
             balance,
             nonce,
             code_hash,
-            code: None, // loaded lazily via code_by_hash_ref
+            code: None, // loaded lazily via code_by_hash
         }))
     }
 
-    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, String> {
+    fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, String> {
         if code_hash == KECCAK_EMPTY {
             return Ok(Bytecode::new());
         }
@@ -220,7 +234,7 @@ impl DatabaseRef for NedbState {
         Ok(Bytecode::new_raw(Bytes::from(bytes)))
     }
 
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, String> {
+    fn storage(&self, address: Address, index: U256) -> Result<U256, String> {
         let id = Self::storage_key(&address, index);
         match self.db.get(COLL_STORAGE, &id) {
             None => Ok(U256::ZERO),
@@ -236,7 +250,7 @@ impl DatabaseRef for NedbState {
         }
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, String> {
+    fn block_hash(&self, _number: U256) -> Result<B256, String> {
         // L2 block hashes wired in slice 7. Return zero for now — EVM contracts
         // rarely rely on BLOCKHASH beyond recent history; zero is a safe placeholder.
         Ok(B256::ZERO)

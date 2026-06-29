@@ -43,8 +43,12 @@ impl RpcServer {
         }
     }
 
-    /// Create a new RPC server with a pre-shared EVM + NEDB (used by the sequencer too).
-    pub fn new_shared(evm: SharedEvm, _mempool: crate::handler::SharedMempool) -> Self {
+    /// Create a new RPC server with a pre-shared EVM. The `_mempool` argument is
+    /// accepted for API compatibility with the older signature but is otherwise
+    /// unused — submitted txs are currently executed inline via the shared EVM.
+    /// Pass any type that implements `IntoIterator` (or simply ignore the second
+    /// position by using `RpcServer::new_shared_evm`).
+    pub fn new_shared<M>(evm: SharedEvm, _mempool: M) -> Self {
         RpcServer {
             evm,
             db: None,

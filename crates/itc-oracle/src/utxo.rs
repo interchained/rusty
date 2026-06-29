@@ -23,7 +23,7 @@ use revm::primitives::{Address, KECCAK_EMPTY, U256};
 use serde_json::json;
 
 use itc_proto::script::{p2pkh_hash160, p2pkh_scriptsig_pubkey, pubkey_to_eth_address};
-use itc_proto::tx::{block_transactions, TxOut};
+use itc_proto::tx::block_transactions;
 
 use itc_evm::NedbState;
 use crate::oracle::sats_to_wei;
@@ -86,8 +86,8 @@ impl UtxoMirror {
                                     minted_count += 1;
                                     minted_total += wei;
                                     println!(
-                                        "[MIRROR] ✅ key revealed h={height} hash160={} \
-                                         eth=0x{} pending={}sat → {}wei",
+                                        "[MIRROR] key revealed h={height} hash160={} \
+                                         eth=0x{} pending={}sat -> {}wei",
                                         hex::encode(hash160),
                                         hex::encode(eth_addr),
                                         pending_sats,
@@ -123,7 +123,7 @@ impl UtxoMirror {
 
         if minted_total > U256::ZERO {
             println!(
-                "[MIRROR] block h={height} — minted {minted_count} credits, total {}wei",
+                "[MIRROR] block h={height} -- minted {minted_count} credits, total {}wei",
                 minted_total
             );
         }
@@ -138,9 +138,11 @@ impl UtxoMirror {
         let addr = Address::from(*eth_addr);
         let caused_by = vec![caused_by_txid.to_string()];
 
-        use revm::DatabaseRef;
+        // `DatabaseRef` lives in `revm::db` (re-exported from `revm::primitives::db`),
+        // not at the `revm` crate root — that path doesn't exist in revm 3.x.
+        use revm::db::DatabaseRef;
         let existing = state
-            .basic_ref(addr)
+            .basic(addr)
             .ok()
             .flatten()
             .map(|i| i.balance)
@@ -170,35 +172,32 @@ impl UtxoMirror {
     }
 
     fn restore_from_nedb(&mut self) {
-        // Restore known key map.
-        if let Some(nodes) = self.db.list(COLL_KEY_MAP).ok() {
-            for node in nodes {
-                if let Some(eth_hex) = node.data.get("eth").and_then(|v| v.as_str()) {
-                    if let (Ok(h), Ok(e)) = (
-                        hex::decode(&node.id),
-                        hex::decode(eth_hex),
-                    ) {
-                        if h.len() == 20 && e.len() == 20 {
-                            let mut hash160 = [0u8; 20];
-                            let mut eth = [0u8; 20];
-                            hash160.copy_from_slice(&h);
-                            eth.copy_from_slice(&e);
-                            self.known.insert(hash160, eth);
-                        }
+        // Restore known key map. nedb-engine's `list()` returns `Vec<Node>`
+        // (not `Result`), so iterate directly.
+        for node in self.db.list(COLL_KEY_MAP) {
+            if let Some(eth_hex) = node.data.get("eth").and_then(|v| v.as_str()) {
+                if let (Ok(h), Ok(e)) = (
+                    hex::decode(&node.id),
+                    hex::decode(eth_hex),
+                ) {
+                    if h.len() == 20 && e.len() == 20 {
+                        let mut hash160 = [0u8; 20];
+                        let mut eth = [0u8; 20];
+                        hash160.copy_from_slice(&h);
+                        eth.copy_from_slice(&e);
+                        self.known.insert(hash160, eth);
                     }
                 }
             }
         }
         // Restore pending balances.
-        if let Some(nodes) = self.db.list(COLL_UTXO_PENDING).ok() {
-            for node in nodes {
-                if let Some(sats) = node.data.get("sats").and_then(|v| v.as_u64()) {
-                    if let Ok(h) = hex::decode(&node.id) {
-                        if h.len() == 20 {
-                            let mut hash160 = [0u8; 20];
-                            hash160.copy_from_slice(&h);
-                            self.pending.insert(hash160, sats);
-                        }
+        for node in self.db.list(COLL_UTXO_PENDING) {
+            if let Some(sats) = node.data.get("sats").and_then(|v| v.as_u64()) {
+                if let Ok(h) = hex::decode(&node.id) {
+                    if h.len() == 20 {
+                        let mut hash160 = [0u8; 20];
+                        hash160.copy_from_slice(&h);
+                        self.pending.insert(hash160, sats);
                     }
                 }
             }

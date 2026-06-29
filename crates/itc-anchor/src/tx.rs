@@ -187,16 +187,19 @@ pub fn broadcast_tx(
         .send_string(&body)
         .map_err(|e| format!("broadcast_tx RPC error: {e}"))?;
 
-    let json: serde_json::Value = response
-        .into_json()
-        .map_err(|e| format!("broadcast_tx JSON parse error: {e}"))?;
+    let response_text = response
+        .into_string()
+        .map_err(|e| format!("broadcast_tx response read error: {e}"))?;
 
-    if let Some(err) = json.get("error").filter(|v| !v.is_null()) {
+    let json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("broadcast_tx JSON parse error: {e}\nraw: {response_text}"))?;
+
+    if let Some(err) = json.get("error").filter(|v: &&serde_json::Value| !v.is_null()) {
         return Err(format!("broadcast_tx node error: {err}"));
     }
 
     json.get("result")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "broadcast_tx: missing txid in response".to_string())
 }

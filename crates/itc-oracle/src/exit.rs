@@ -79,43 +79,43 @@ impl ExitScanner {
         // In v1: scan NEDB l2_pending_exits for exits where release_at_block <= current_block
         // This is a polling loop — production would use an event-driven approach.
         // For now, we check up to 100 pending exits per epoch.
-        if let Some(nodes) = self.db.list("l2_pending_exits").ok() {
-            for node in nodes {
-                let release_at = node.data.get("release_at_block")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(u64::MAX);
-                if current_block < release_at {
-                    continue;
-                }
-                // This exit is ready to release
-                let l1_recipient = node.data.get("l1_recipient")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let release_sats = node.data.get("release_sats")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let l2_tx_hash = node.id.clone();
+        // nedb-engine's `list()` returns `Vec<Node>` directly (no Result), so
+        // iterate without `.ok()`.
+        for node in self.db.list("l2_pending_exits") {
+            let release_at = node.data.get("release_at_block")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX);
+            if current_block < release_at {
+                continue;
+            }
+            // This exit is ready to release
+            let l1_recipient = node.data.get("l1_recipient")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let release_sats = node.data.get("release_sats")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let l2_tx_hash = node.id.clone();
 
-                if release_sats == 0 || l1_recipient.is_empty() {
-                    continue;
-                }
+            if release_sats == 0 || l1_recipient.is_empty() {
+                continue;
+            }
 
-                match self.release_on_l1(&l2_tx_hash, &l1_recipient, release_sats) {
-                    Ok(l1_txid) => {
-                        println!("[EXIT] ✅ released {release_sats} sats to {l1_recipient} — L1 tx {l1_txid}");
-                        // Mark as processed
-                        let done = json!({
-                            "status": "released",
-                            "l1_txid": l1_txid,
-                            "release_block": current_block,
-                        });
-                        let _ = self.db.put("l2_processed_exits", &l2_tx_hash, done, vec![], None, None);
-                        // Remove from pending (best effort)
-                    }
-                    Err(e) => {
-                        println!("[EXIT] ❌ release failed for {l2_tx_hash}: {e}");
-                    }
+            match self.release_on_l1(&l2_tx_hash, &l1_recipient, release_sats) {
+                Ok(l1_txid) => {
+                    println!("[EXIT] released {release_sats} sats to {l1_recipient} -- L1 tx {l1_txid}");
+                    // Mark as processed
+                    let done = json!({
+                        "status": "released",
+                        "l1_txid": l1_txid,
+                        "release_block": current_block,
+                    });
+                    let _ = self.db.put("l2_processed_exits", &l2_tx_hash, done, vec![], None, None);
+                    // Remove from pending (best effort)
+                }
+                Err(e) => {
+                    println!("[EXIT] release failed for {l2_tx_hash}: {e}");
                 }
             }
         }
@@ -144,13 +144,13 @@ impl ExitScanner {
         let _ = self.db.put("l2_pending_exits", l2_tx_hash, data,
             vec![l2_tx_hash.to_string()], None, None);
         println!(
-            "[EXIT] queued {release_sats} sats for {l1_recipient} — releasable at L2 block {release_at}"
+            "[EXIT] queued {release_sats} sats for {l1_recipient} -- releasable at L2 block {release_at}"
         );
     }
 
-    fn release_on_l1(&self, l2_tx_hash: &str, l1_recipient: &str, release_sats: u64) -> Result<String, String> {
+    fn release_on_l1(&self, _l2_tx_hash: &str, _l1_recipient: &str, release_sats: u64) -> Result<String, String> {
         let wif = self.release_key_wif.as_deref()
-            .ok_or("ITC_BRIDGE_RELEASE_WIF not set — release is dry-run")?;
+            .ok_or("ITC_BRIDGE_RELEASE_WIF not set -- release is dry-run")?;
         let txid_hex = self.utxo_txid.as_deref()
             .ok_or("ITC_RELEASE_UTXO_TXID not set")?;
         let vout = self.utxo_vout
@@ -164,7 +164,7 @@ impl ExitScanner {
 
         let key = AnchorKey::from_wif(wif)?;
 
-        // Decode txid (display → internal byte order)
+        // Decode txid (display -> internal byte order)
         let txid_bytes = hex::decode(txid_hex).map_err(|e| e.to_string())?;
         if txid_bytes.len() != 32 { return Err("bad txid length".to_string()); }
         let mut utxo_txid = [0u8; 32];

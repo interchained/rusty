@@ -160,8 +160,11 @@ fn main() {
     // Dry-run if ITC_ANCHOR_WIF is not set (logs what would be posted).
     {
         let anchor_config = AnchorConfig::from_env(endpoint, proto::MAGIC_MAIN);
-        let anchor_db = Arc::clone(&store);
-        AnchorPoster::new(anchor_config, anchor_db.db.clone()).spawn();
+        // The Store's `db` field is already an Arc<Db>; clone the Arc so the
+        // poster thread holds its own owned handle while `store` is still owned
+        // here (we Arc it later for the serve loop).
+        let anchor_db = store.db.clone();
+        AnchorPoster::new(anchor_config, anchor_db).spawn();
         println!("itc-node[anchor]: poster spawned (set ITC_ANCHOR_WIF to go live)");
     }
 

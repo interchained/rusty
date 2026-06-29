@@ -244,7 +244,7 @@ impl DepositOracle {
             );
             match self.mint_net(&p.deposit, net_sats) {
                 Ok(()) => {
-                    println!("[ORACLE] minted {} wei for {}", net_sats as u128 * SATS_TO_WEI_FACTOR, p.deposit.l1_txid_display);
+                    println!("[ORACLE] minted {} wei for {}", net_sats as u128 * SATS_TO_WEI_FACTOR as u128, p.deposit.l1_txid_display);
                     // Remove from pending NEDB collection
                     let _ = self.db.put(
                         COLL_ORACLE_PENDING, &pending_key(&p.deposit.l1_txid),
@@ -407,7 +407,9 @@ fn deserialize_pending(data: &serde_json::Value) -> Option<PendingDeposit> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn sats_to_wei(sats: u64) -> U256 {
+/// Convert satoshis to wei.  Public so the UTXO mirror (which lives in
+/// `crate::utxo`) can call it without redefining the conversion.
+pub fn sats_to_wei(sats: u64) -> U256 {
     U256::from(sats) * U256::from(SATS_TO_WEI_FACTOR)
 }
 

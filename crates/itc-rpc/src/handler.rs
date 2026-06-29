@@ -2,10 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use revm::primitives::{Address, BlockEnv, Bytes, TransactTo, TxEnv, U256};
+use revm::primitives::{Address, Bytes, TransactTo, TxEnv, U256};
 use serde_json::{json, Value};
-
-use std::sync::Arc;
 
 use itc_evm::ItcEvm;
 use nedb_engine::Db;
@@ -196,8 +194,8 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
 // ── EVM state accessors ───────────────────────────────────────────────────────
 
 fn evm_balance(evm: &ItcEvm, addr: Address) -> U256 {
-    use revm::DatabaseRef;
-    evm.cache.db.basic_ref(addr)
+    use revm::db::DatabaseRef;
+    evm.cache.db.basic(addr)
         .ok()
         .flatten()
         .map(|info| info.balance)
@@ -205,8 +203,8 @@ fn evm_balance(evm: &ItcEvm, addr: Address) -> U256 {
 }
 
 fn evm_nonce(evm: &ItcEvm, addr: Address) -> u64 {
-    use revm::DatabaseRef;
-    evm.cache.db.basic_ref(addr)
+    use revm::db::DatabaseRef;
+    evm.cache.db.basic(addr)
         .ok()
         .flatten()
         .map(|info| info.nonce)
@@ -214,13 +212,13 @@ fn evm_nonce(evm: &ItcEvm, addr: Address) -> u64 {
 }
 
 fn evm_code(evm: &ItcEvm, addr: Address) -> Vec<u8> {
-    use revm::DatabaseRef;
-    let info = evm.cache.db.basic_ref(addr).ok().flatten();
+    use revm::db::DatabaseRef;
+    let info = evm.cache.db.basic(addr).ok().flatten();
     match info {
         Some(i) if i.code_hash != revm::primitives::KECCAK_EMPTY => {
-            evm.cache.db.code_by_hash_ref(i.code_hash)
+            evm.cache.db.code_by_hash(i.code_hash)
                 .ok()
-                .map(|code| code.bytecode().to_vec())
+                .map(|code| code.bytes().to_vec())
                 .unwrap_or_default()
         }
         _ => vec![],

@@ -12,7 +12,6 @@
 //! produced it. AS OF queries replay any historical EVM state. TRACE walks back
 //! from any balance to the transaction tree that created it.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use nedb_engine::Db;
@@ -20,7 +19,7 @@ use revm::{
     db::CacheDB,
     primitives::{
         AccountInfo, Address, BlockEnv, Bytes, CfgEnv, ExecutionResult,
-        ResultAndState, SpecId, TransactTo, TxEnv, B256, U256,
+        ResultAndState, TransactTo, TxEnv, B256, U256,
     },
     EVM,
 };
@@ -57,12 +56,17 @@ impl ItcEvm {
     }
 
     /// Build the revm CfgEnv for ITC-L2.
+    ///
+    /// `disable_base_fee` / `disable_block_gas_limit` are not set here —
+    /// those fields are gated behind the `optional_no_base_fee` /
+    /// `optional_block_gas_limit` cargo features in revm 3.x, which we don't
+    /// enable. The default behavior (base-fee enforced, gas-limit enforced) is
+    /// fine for ITC-L2: we set `basefee = 0` in `set_block`, so EIP-1559
+    /// pressure is zero anyway, and the 30M block gas limit is the standard.
     fn cfg_env() -> CfgEnv {
         let mut cfg = CfgEnv::default();
         cfg.chain_id = CHAIN_ID;
         cfg.spec_id = EVM_SPEC;
-        cfg.disable_base_fee = true;   // No base fee burn on ITC-L2 v1
-        cfg.disable_block_gas_limit = false;
         cfg
     }
 
@@ -202,13 +206,14 @@ mod tests {
 
         // Verify provenance: Bob's account was caused_by the tx
         // (NEDB stores caused_by internally; the write above went through with it)
-        println!("✅ transfer: bob balance = {} wei", bob_balance);
-        println!("✅ provenance: caused_by = [{}]", hex::encode(tx_hash.as_slice()));
-        println!("✅ engine head after tx: {}", db.head());
+        println!("transfer: bob balance = {} wei", bob_balance);
+        println!("provenance: caused_by = [{}]", hex::encode(tx_hash.as_slice()));
+        println!("engine head after tx: {}", db.head());
     }
 
     #[test]
-    fn genesis_account_readable_via_basic_ref() {
+    fn genesis_account_readable_via_basic() {
+        use revm::db::DatabaseRef;
         let tmp = tempfile::tempdir().unwrap();
         let db = test_db(tmp.path());
         let state = NedbState::new(Arc::clone(&db));
@@ -216,10 +221,10 @@ mod tests {
         let alice = addr("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         state.seed_account(alice, ITC * U256::from(50), 0);
 
-        let info = state.basic_ref(alice).unwrap().unwrap();
+        let info = state.basic(alice).unwrap().unwrap();
         assert_eq!(info.balance, ITC * U256::from(50));
         assert_eq!(info.nonce, 0);
         assert_eq!(info.code_hash, revm::primitives::KECCAK_EMPTY);
-        println!("✅ genesis account: balance = {} wei", info.balance);
+        println!("genesis account: balance = {} wei", info.balance);
     }
 }
