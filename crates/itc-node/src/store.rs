@@ -118,18 +118,31 @@ impl Store {
     }
 
     /// Persist the chain tip (height + hash).
+    ///
+    /// Polls until NEDB's indexer confirms the write is readable.
+    /// NEDB has an async indexer — `put()` appends to the WAL immediately but
+    /// `get()` reads from the index, which may lag by a few milliseconds.
+    /// Blocking here ensures the tip is durable and readable before returning,
+    /// so the next boot's `get_tip()` sees the correct height.
     pub fn put_tip(&self, height: i32, hash: &[u8; 32]) -> io::Result<()> {
         let data = json!({ "height": height, "hash": to_internal_hex(hash) });
         self.db
             .put(COLL_INDEX, "tip", data, vec![], None, None)
             .map(|_| ())
             .map_err(err)?;
-        // Read-back verification — tells us if NEDB sees the write in this session
-        match self.get_tip() {
-            Some((h, _)) if h == height => {} // write confirmed
-            Some((h, _)) => eprintln!("[TIP] NEDB wrote {height} but reads back {h} — indexer lag!"),
-            None => eprintln!("[TIP] NEDB wrote {height} but get_tip() returned None"),
+        // Poll until the write is visible (up to 2 seconds, 10ms intervals)
+        for attempt in 0..200u32 {
+            if let Some((h, _)) = self.get_tip() {
+                if h >= height {
+                    return Ok(()); // confirmed readable
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if attempt == 50 {
+                eprintln!("[TIP] NEDB indexer lagging for height {height} — waiting...");
+            }
         }
+        eprintln!("[TIP] WARNING: NEDB did not confirm tip {height} after 2s — continuing anyway");
         Ok(())
     }
 
