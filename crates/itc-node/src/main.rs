@@ -206,7 +206,7 @@ fn main() {
         chain.tip_height(),
         anchor_tip.height
     );
-    if let Err(e) = sync::sync_headers(&mut peer, &mut chain, &store, &shutdown) {
+    if let Err(e) = sync::sync_headers(&mut peer, &mut chain, &store, &shutdown, Some(&live_tip)) {
         eprintln!("itc-node: header sync error: {e}");
     }
     println!(
@@ -304,7 +304,7 @@ fn main() {
                 else { continue };
                 let mut chain = crate::chain::HeaderChain::resume_from_tip(cur_h, cur_hash);
                 let flag = AtomicBool::new(false);
-                if sync::sync_headers(&mut peer, &mut chain, &s, &flag).is_err() { continue }
+                if sync::sync_headers(&mut peer, &mut chain, &s, &flag, None).is_err() { continue }
                 let new_h = chain.tip_height();
                 if new_h <= cur_h { continue }
                 let _ = sync::sync_blocks(&mut peer, &chain, &s, (cur_h + 1).max(follow_osh), &flag);

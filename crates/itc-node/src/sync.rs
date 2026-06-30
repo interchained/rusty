@@ -1,7 +1,7 @@
 //! Sync — header sync and full block body download from the anchor peer.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 use itc_proto::block::BlockHeader;
 use itc_proto::hashes::to_internal_hex;
@@ -17,7 +17,15 @@ const BLOCK_BATCH: i32 = 16;
 // ── Header sync ──────────────────────────────────────────────────────────────
 
 /// Sync headers forward from `peer` into `chain`, persisting into `store`.
-pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store, shutdown: &AtomicBool) -> io::Result<()> {
+/// `live_tip` is updated after every batch so the ctrlc handler always has a
+/// real tip height to flush — even if killed mid-sync.
+pub fn sync_headers(
+    peer: &mut Peer,
+    chain: &mut HeaderChain,
+    store: &Store,
+    shutdown: &AtomicBool,
+    live_tip: Option<&Arc<Mutex<(i32, [u8; 32])>>>,
+) -> io::Result<()> {
     let target = peer.peer_height;
     let mut rounds = 0u32;
     loop {
@@ -43,6 +51,12 @@ pub fn sync_headers(peer: &mut Peer, chain: &mut HeaderChain, store: &Store, shu
         }
         store.put_headers_batch(&to_persist)?;
         store.put_tip(chain.tip_height(), &chain.tip_hash())?;
+        // Update shared tip so ctrlc handler always has a real height to flush
+        if let Some(lt) = live_tip {
+            if let Ok(mut g) = lt.lock() {
+                *g = (chain.tip_height(), chain.tip_hash());
+            }
+        }
 
         let after = chain.tip_height();
         // Single-line overwriting progress bar
