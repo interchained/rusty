@@ -21,7 +21,9 @@ use itc_proto::hashes::to_internal_hex;
 
 const COLL_HEADERS: &str = "headers";
 const COLL_BLOCKS: &str = "blocks";
-const COLL_INDEX: &str = "chain_tip"; // "index" is reserved by NEDB internally
+// COLL_INDEX kept for reference but tip now lives in COLL_HEADERS as "__tip__"
+#[allow(dead_code)]
+const COLL_INDEX: &str = "chain_tip";
 
 type PutOp = (String, String, serde_json::Value, Vec<String>, Option<String>, Option<String>);
 
@@ -138,10 +140,11 @@ impl Store {
     /// `get()` reads from the index, which may lag by a few milliseconds.
     /// Blocking here ensures the tip is durable and readable before returning,
     /// so the next boot's `get_tip()` sees the correct height.
+    /// Tip lives in headers/"__tip__" — same collection as blocks, same persistence.
     pub fn put_tip(&self, height: i32, hash: &[u8; 32]) -> io::Result<()> {
         let data = json!({ "height": height, "hash": to_internal_hex(hash) });
         self.db
-            .put(COLL_INDEX, "tip", data, vec![], None, None)
+            .put(COLL_HEADERS, "__tip__", data, vec![], None, None)
             .map(|_| ())
             .map_err(err)?;
         // Poll until the write is visible in the index (async indexer lag)
@@ -182,7 +185,7 @@ impl Store {
 
     /// Load the persisted chain tip, if any.
     pub fn get_tip(&self) -> Option<(i32, [u8; 32])> {
-        let node = self.db.get(COLL_INDEX, "tip")?;
+        let node = self.db.get(COLL_HEADERS, "__tip__")?;
         let height = node.data.get("height")?.as_i64()? as i32;
         let bytes = hex_decode(node.data.get("hash")?.as_str()?)?;
         if bytes.len() != 32 {
