@@ -36,7 +36,8 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
             RpcResponse::ok(id, json!(hex_qty(epoch)))
         }
         "eth_gasPrice" => {
-            RpcResponse::ok(id, json!("0x0")) // No base fee in ITC-L2 v1
+            // 1 gwei — low enough to be cheap, non-zero so wallets handle gas correctly
+            RpcResponse::ok(id, json!("0x3B9ACA00"))
         }
 
         // ── Account state ────────────────────────────────────────────────────
@@ -107,16 +108,20 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
                 Err(e) => return RpcResponse::invalid_params(id, e),
             };
             let mut evm = evm.lock().unwrap();
-            match evm.simulate_tx(tx) {
-                Ok(res) => {
-                    let gas = match res.result {
-                        revm::primitives::ExecutionResult::Success { gas_used, .. } => gas_used,
-                        _ => 21_000,
-                    };
-                    RpcResponse::ok(id, json!(hex_qty(gas)))
-                }
-                Err(e) => RpcResponse::internal(id, e),
+            // For native transfers (no data), always return 21_000.
+            // Simulation with zero gas price can give misleading results.
+            let is_native = tx.data.is_empty();
+            if is_native {
+                return RpcResponse::ok(id, json!(hex_qty(21_000u64)));
             }
+            let gas = match evm.simulate_tx(tx) {
+                Ok(res) => match res.result {
+                    revm::primitives::ExecutionResult::Success { gas_used, .. } => gas_used,
+                    _ => 21_000, // revert/halt fallback
+                },
+                Err(_) => 21_000, // simulation error fallback — don't crash wallet
+            };
+            RpcResponse::ok(id, json!(hex_qty(gas)))
         }
 
         // ── Transaction submission ────────────────────────────────────────────
@@ -195,7 +200,10 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
 
 fn evm_balance(evm: &ItcEvm, addr: Address) -> U256 {
     use revm::db::DatabaseRef;
-    evm.cache.db.basic(addr)
+    // Read directly from NEDB (NedbState), bypassing the CacheDB in-memory cache.
+    // The CacheDB cache is populated at tx start and NOT updated after commit_changes
+    // writes to NEDB — so balance/nonce reads through .basic() return stale values.
+    evm.cache.db.db.basic_ref(addr)
         .ok()
         .flatten()
         .map(|info| info.balance)
@@ -204,7 +212,8 @@ fn evm_balance(evm: &ItcEvm, addr: Address) -> U256 {
 
 fn evm_nonce(evm: &ItcEvm, addr: Address) -> u64 {
     use revm::db::DatabaseRef;
-    evm.cache.db.basic(addr)
+    // Same — bypass CacheDB, read nonce fresh from NEDB after each block.
+    evm.cache.db.db.basic_ref(addr)
         .ok()
         .flatten()
         .map(|info| info.nonce)
