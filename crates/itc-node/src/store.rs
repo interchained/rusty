@@ -123,7 +123,14 @@ impl Store {
         self.db
             .put(COLL_INDEX, "tip", data, vec![], None, None)
             .map(|_| ())
-            .map_err(err)
+            .map_err(err)?;
+        // Read-back verification — tells us if NEDB sees the write in this session
+        match self.get_tip() {
+            Some((h, _)) if h == height => {} // write confirmed
+            Some((h, _)) => eprintln!("[TIP] NEDB wrote {height} but reads back {h} — indexer lag!"),
+            None => eprintln!("[TIP] NEDB wrote {height} but get_tip() returned None"),
+        }
+        Ok(())
     }
 
     /// Load the persisted chain tip, if any.
