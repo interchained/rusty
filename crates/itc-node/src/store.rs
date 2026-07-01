@@ -21,8 +21,10 @@
 //! `sequencer::produce_block` (L2, every 500), plus the exit handler in `main.rs`.
 
 use std::io;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nedb_engine::Db;
 use serde_json::json;
@@ -52,24 +54,23 @@ impl Store {
 
     /// Open (or create) the NEDB-backed store at `path`.
     ///
-    /// On cold start (no MANIFEST on disk), NEDB rebuilds the index from the WAL
-    /// in a background thread. `head()` returns empty until the scan completes.
-    /// We wait here so that `tip_header()` and other reads see the full indexed state.
+    /// On cold start (no MANIFEST on disk, or a pre-2.5.43 MANIFEST self-healing
+    /// into a durable one), NEDB rebuilds the index from the WAL in a background
+    /// thread. `tip_header()` and other resume reads are only trustworthy once
+    /// that scan finishes — we wait here for the real signal, `scan_status()
+    /// .scan_complete`, and NEVER claim done before it is: a database sized in
+    /// the millions of objects can take longer to index than any fixed timeout
+    /// would allow, and giving up early used to silently print "scan complete"
+    /// anyway — which meant `tip_header()` came back empty right after, and the
+    /// node fell back to a full genesis resync. There is no safe way to proceed
+    /// without the real index; waiting is correct, not just cautious.
     pub fn open(path: &str) -> io::Result<Store> {
         let db = Db::open(Path::new(path), None).map_err(err)?;
         let db = Arc::new(db);
         Db::start_cold_scan(Arc::clone(&db));
-        // Wait for the cold scan to complete (indicated by a non-empty head).
-        // On warm start the head is immediately available; on cold start we wait.
-        // Timeout: 300s (5 minutes) for very large databases.
         let store = Store { db };
-        if store.head().is_empty() {
-            println!("itc-node[store]: cold start — waiting for NEDB scan to complete...");
-            for _ in 0..30_000u32 { // 300s at 10ms intervals
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                if !store.head().is_empty() { break; }
-            }
-            println!("itc-node[store]: NEDB scan complete (head={})", &store.head()[..16.min(store.head().len())]);
+        if !store.db.scan_status().scan_complete {
+            wait_for_cold_scan(&store.db);
         }
         Ok(store)
     }
@@ -165,6 +166,118 @@ impl Store {
         hash.copy_from_slice(&bytes);
         Some((height, hash))
     }
+}
+
+/// Block until the cold scan reports `scan_complete`, rendering a live progress
+/// display. No fixed timeout: giving up early and reporting "done" anyway is
+/// exactly the bug this replaces (see `Store::open` docs) — for a database with
+/// millions of objects, waiting minutes is normal and correct, not stuck.
+///
+/// There is no engine-exposed "total objects" figure to compute a true
+/// percentage against (only `indexed_count`, which grows as the scan runs), so
+/// this shows what is actually and honestly known: a live count, a measured
+/// indexing rate, and elapsed time — dressed as a scanning hologram rather than
+/// a progress bar promising a percentage nothing here can back up.
+fn wait_for_cold_scan(db: &Db) {
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const SWEEP_WIDTH: usize = 28;
+    const FRAME_INTERVAL: Duration = Duration::from_millis(90);
+    const RATE_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+    const MILESTONE_INTERVAL: Duration = Duration::from_secs(30);
+
+    let cyan = "\x1b[36m";
+    let bcyan = "\x1b[1;36m";
+    let dim = "\x1b[2m";
+    let bold = "\x1b[1m";
+    let green = "\x1b[1;32m";
+    let reset = "\x1b[0m";
+
+    let start = Instant::now();
+    let mut last_sample_t = start;
+    let mut last_sample_n = db.scan_status().indexed_count as u64;
+    let mut rate = 0.0f64;
+    let mut frame = 0usize;
+    let mut last_milestone = start;
+
+    eprintln!(
+        "{cyan}  ◈ cold start — indexing the DAG in the background (one-time, until the next warm boot){reset}"
+    );
+
+    loop {
+        let status = db.scan_status();
+        if status.scan_complete {
+            break;
+        }
+        let count = status.indexed_count as u64;
+        let now = Instant::now();
+        let elapsed = now.duration_since(start).as_secs_f64();
+
+        if now.duration_since(last_sample_t) >= RATE_SAMPLE_INTERVAL {
+            let dt = now.duration_since(last_sample_t).as_secs_f64();
+            let dn = count.saturating_sub(last_sample_n) as f64;
+            if dt > 0.0 {
+                rate = dn / dt;
+            }
+            last_sample_t = now;
+            last_sample_n = count;
+        }
+
+        // Holographic sweep: a bright glyph travels back and forth across a dim
+        // field — an honest "activity" indicator, not a percentage claim.
+        let cycle = SWEEP_WIDTH.saturating_sub(1).max(1) * 2;
+        let pos = frame % cycle.max(1);
+        let pos = if pos < SWEEP_WIDTH { pos } else { cycle - pos };
+        let mut sweep = String::with_capacity(SWEEP_WIDTH);
+        for i in 0..SWEEP_WIDTH {
+            sweep.push_str(if i == pos { "█" } else { "▁" });
+        }
+
+        eprint!(
+            "\r  {cyan}{spin}{reset}  {bcyan}[{sweep}]{reset}  {bold}{count:>13}{reset} objects indexed  {dim}({rate:>7.0}/s · {elapsed:>5.0}s elapsed){reset}   ",
+            spin = SPINNER[frame % SPINNER.len()],
+            sweep = sweep,
+            count = format_count(count),
+            rate = rate,
+            elapsed = elapsed,
+        );
+        let _ = std::io::stderr().flush();
+
+        // A plain, newline-terminated line every 30s so log collectors that
+        // mangle carriage-return-updated lines (journald, docker logs, etc.)
+        // still see periodic, honest proof of progress.
+        if now.duration_since(last_milestone) >= MILESTONE_INTERVAL {
+            println!(
+                "itc-node[store]: still indexing — {} objects so far ({:.0}/s, {:.0}s elapsed)",
+                format_count(count), rate, elapsed
+            );
+            last_milestone = now;
+        }
+
+        frame += 1;
+        std::thread::sleep(FRAME_INTERVAL);
+    }
+
+    let final_count = db.scan_status().indexed_count as u64;
+    let total_time = start.elapsed().as_secs_f64();
+    eprintln!(
+        "\r  {green}✓{reset}  cold scan complete — {bold}{}{reset} objects indexed in {:.1}s{pad}",
+        format_count(final_count),
+        total_time,
+        pad = " ".repeat(30),
+    );
+}
+
+/// Format a count with thousands separators for readability at millions scale.
+fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
 }
 
 fn hex_encode(b: &[u8]) -> String {

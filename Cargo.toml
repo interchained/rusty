@@ -18,4 +18,4 @@ authors = ["Interchained LLC"]
 # workspace on one resolved copy, structurally, instead of relying on every
 # future bump remembering to touch N Cargo.tomls in lockstep.
 [workspace.dependencies]
-nedb-engine = { git = "https://github.com/Eth-Interchained/nedb", tag = "v2.5.44", package = "nedb-engine" }
+nedb-engine = { git = "https://github.com/Eth-Interchained/nedb", tag = "v2.5.45", package = "nedb-engine" }
