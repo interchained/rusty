@@ -32,7 +32,7 @@ pub const MAX_FEE_BPS: u64 = 1_000;
 
 const ITC_HRP: &str = "itc";
 
-fn hash160_from_bech32_address(addr: &str) -> Result<[u8; 20], String> {
+pub(crate) fn hash160_from_bech32_address(addr: &str) -> Result<[u8; 20], String> {
     use bech32::FromBase32;
     let (hrp, data, _variant) =
         bech32::decode(addr).map_err(|e| format!("bech32 decode: {e}"))?;
