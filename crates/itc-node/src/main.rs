@@ -381,6 +381,25 @@ fn main() {
         epoch
     };
 
+    // Restore the L2 chain height BEFORE the sequencer starts, so block numbers
+    // are monotonic across restarts (eth_blockNumber never goes backwards; new
+    // receipts never collide with old ones). Prefer the durable meta record;
+    // fall back to the max receipt block_number for datadirs created before the
+    // durable-epoch fix — a one-time, backwards-compatible recovery. Fresh chain
+    // → 0 (unchanged genesis behavior).
+    {
+        let resume = store.db.get("l2_meta", "chain_height")
+            .and_then(|n| n.data.get("height").and_then(|v| v.as_u64()))
+            .or_else(|| store.db.list("l2_receipts").iter()
+                .filter_map(|n| n.data.get("block_number").and_then(|v| v.as_u64()))
+                .max())
+            .unwrap_or(0);
+        if resume > 0 {
+            epoch.store(resume, Ordering::SeqCst);
+            println!("itc-node[seq]: resumed L2 chain height at {resume} (durable epoch — no restart renumber)");
+        }
+    }
+
     // L2 block sequencer — ticks every 5s, drains mempool, executes txs, persists
     // receipts, and flushes L2 durably on every state-changing block + on shutdown.
     Sequencer::new(
