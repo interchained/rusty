@@ -150,6 +150,25 @@ impl Sequencer {
                 Some(e) => e,
                 None => continue,
             };
+
+            // ── Bridge exit detection (aITC → ITC) ────────────────────────────
+            // A burn is a value transfer TO the well-known EXIT_ADDRESS
+            // (0x…dEaD) whose calldata carries the ITC L1 recipient address in
+            // ASCII (the Elara bridge always sets it). Capture the probe BEFORE
+            // execute_tx consumes tx_env; queue it only if execution succeeds.
+            let exit_probe: Option<(u128, Vec<u8>)> = match &tx_env.transact_to {
+                revm::primitives::TransactTo::Call(to)
+                    if hex::encode(to.as_slice()) == itc_oracle::EXIT_ADDRESS
+                        && tx_env.value > U256::ZERO =>
+                {
+                    Some((
+                        u128::try_from(tx_env.value).unwrap_or(0),
+                        tx_env.data.to_vec(),
+                    ))
+                }
+                _ => None,
+            };
+
             let gas_used;
             let success;
             match evm.execute_tx(tx_env, tx.tx_hash) {
@@ -167,6 +186,30 @@ impl Sequencer {
                 }
             }
             total_gas += gas_used;
+
+            if success {
+                if let Some((amount_wei, calldata)) = exit_probe {
+                    let tx_hash_hex = format!("0x{}", hex::encode(tx.tx_hash.as_slice()));
+                    let from_hex    = format!("0x{}", hex::encode(tx.from.as_slice()));
+                    // Calldata → ITC L1 recipient. ASCII, trimmed; sanity-gated
+                    // so garbage calldata can't route a release to a junk string.
+                    let recipient = String::from_utf8(calldata)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| looks_like_itc_address(s));
+                    match recipient {
+                        Some(r) if amount_wei > 0 => {
+                            self.exit_scanner.queue_exit(&tx_hash_hex, &from_hex, amount_wei, &r, block_num);
+                        }
+                        _ => {
+                            println!(
+                                "[EXIT] burn {tx_hash_hex} has no valid ITC L1 recipient in calldata — skipped (funds burned, no release queued)"
+                            );
+                        }
+                    }
+                }
+            }
+
             receipts.push(TxReceipt {
                 tx_hash: tx.tx_hash,
                 from: tx.from,
@@ -205,6 +248,22 @@ impl Sequencer {
             let _ = self.db.put("l2_receipts", &id, data, vec![], None, None);
         }
     }
+}
+
+/// Loose plausibility gate for an ITC L1 address arriving in burn calldata:
+/// bech32 mainnet ("itc1…", 14-90 chars of the bech32 charset) or a legacy
+/// base58 address (26-35 alphanumerics). This is NOT validation — the release
+/// path builds a real script for it — it only stops garbage calldata from
+/// being persisted as a recipient.
+fn looks_like_itc_address(s: &str) -> bool {
+    let n = s.len();
+    if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if s.starts_with("itc1") {
+        return (14..=90).contains(&n); // bech32 mainnet
+    }
+    (26..=35).contains(&n) // legacy base58
 }
 
 fn build_tx_env_from_pending(tx: &PendingTx) -> Option<revm::primitives::TxEnv> {
