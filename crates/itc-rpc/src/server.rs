@@ -5,6 +5,7 @@
 //!
 //! Bind address: `ITC_RPC_ADDR` env var, default `0.0.0.0:8545`.
 
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -17,7 +18,7 @@ use tiny_http::{Header, Response, Server};
 use itc_evm::ItcEvm;
 use nedb_engine::Db;
 
-use crate::handler::{dispatch, SharedDb, SharedEvm};
+use crate::handler::{dispatch, SharedDb, SharedEvm, SharedMempool};
 use crate::types::{RpcRequest, RpcResponse};
 
 /// Default bind address.
@@ -30,6 +31,11 @@ pub struct RpcServer {
     db: Option<SharedDb>,
     /// Monotonic L2 epoch counter — advanced by the sequencer each block.
     epoch: Arc<AtomicU64>,
+    /// Shared mempool — eth_sendRawTransaction enqueues here; the sequencer
+    /// drains it in produce_block. THE single execution path (previously the
+    /// mempool was ignored and txs ran inline, bypassing receipts + bridge
+    /// exit detection entirely).
+    mempool: SharedMempool,
 }
 
 impl RpcServer {
@@ -39,19 +45,20 @@ impl RpcServer {
             evm: Arc::new(Mutex::new(evm)),
             db: None,
             epoch: Arc::new(AtomicU64::new(0)),
+            mempool: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
-    /// Create a new RPC server with a pre-shared EVM. The `_mempool` argument is
-    /// accepted for API compatibility with the older signature but is otherwise
-    /// unused — submitted txs are currently executed inline via the shared EVM.
-    /// Pass any type that implements `IntoIterator` (or simply ignore the second
-    /// position by using `RpcServer::new_shared_evm`).
-    pub fn new_shared<M>(evm: SharedEvm, _mempool: M) -> Self {
+    /// Create a new RPC server with a pre-shared EVM and the sequencer's mempool.
+    /// Submitted txs are ENQUEUED here and executed by the sequencer's
+    /// produce_block — the one path that persists receipts, runs bridge-exit
+    /// detection, and flushes durably.
+    pub fn new_shared(evm: SharedEvm, mempool: SharedMempool) -> Self {
         RpcServer {
             evm,
             db: None,
             epoch: Arc::new(AtomicU64::new(0)),
+            mempool,
         }
     }
 
@@ -84,9 +91,10 @@ impl RpcServer {
             let evm = Arc::clone(&self.evm);
             let epoch = self.epoch.load(Ordering::Relaxed);
             let db = self.db.clone();
+            let mempool = Arc::clone(&self.mempool);
 
             thread::spawn(move || {
-                let response = handle_request(&mut request, &evm, epoch, db.as_ref());
+                let response = handle_request(&mut request, &evm, epoch, db.as_ref(), &mempool);
                 let body = serde_json::to_string(&response).unwrap_or_default();
                 let resp = Response::from_data(body.clone())
                     .with_header(
@@ -119,6 +127,7 @@ fn handle_request(
     evm: &SharedEvm,
     epoch: u64,
     db: Option<&SharedDb>,
+    mempool: &SharedMempool,
 ) -> RpcResponse {
     // Handle CORS preflight
     if request.method() == &tiny_http::Method::Options {
@@ -144,5 +153,5 @@ fn handle_request(
     let id = rpc_req.id.clone().unwrap_or(Value::Null);
     let params = rpc_req.params.as_ref().unwrap_or(&Value::Null).clone();
 
-    dispatch(&rpc_req.method, &params, id, evm, epoch, db)
+    dispatch(&rpc_req.method, &params, id, evm, epoch, db, mempool)
 }
