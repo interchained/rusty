@@ -129,10 +129,20 @@ pub fn fetch_best_utxo(p2pkh_address: &str) -> Result<Option<Utxo>, String> {
 /// The amount is built as an EXACT 8-decimal number from the satoshi integer
 /// (no f64 rounding) so the recipient is paid to the satoshi.
 pub fn send_to_address(address: &str, sats: u64) -> Result<String, String> {
-    let url  = std::env::var("ITC_L1_RPC_URL")
+    let base = std::env::var("ITC_L1_RPC_URL")
         .map_err(|_| "ITC_L1_RPC_URL not set".to_string())?;
     let user = std::env::var("ITC_L1_RPC_USER").unwrap_or_default();
     let pass = std::env::var("ITC_L1_RPC_PASS").unwrap_or_default();
+
+    // sendtoaddress is a WALLET RPC — it must hit the per-wallet endpoint
+    // `<base>/wallet/<name>`, not the bare node endpoint `/` (which 500s with
+    // no/ambiguous wallet loaded). Set ITC_L1_WALLET to the loaded wallet that
+    // holds the bridge float. If unset, we post to the base URL (works only
+    // when exactly one wallet is loaded and the URL already targets it).
+    let url = match std::env::var("ITC_L1_WALLET") {
+        Ok(w) if !w.trim().is_empty() => format!("{}/wallet/{}", base.trim_end_matches('/'), w.trim()),
+        _ => base,
+    };
 
     // Exact ITC amount (8 decimals) from sats — parsed to a JSON number so no
     // floating-point artifact can under/over-pay.
