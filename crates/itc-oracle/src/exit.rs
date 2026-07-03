@@ -31,9 +31,6 @@ use std::sync::Arc;
 use nedb_engine::Db;
 use serde_json::json;
 
-use itc_anchor::signer::AnchorKey;
-use itc_anchor::tx::{broadcast_tx, build_release_tx, MIN_FEE_SATS};
-
 /// The L2 burn/exit address. Any aITC sent here with value > 0 triggers an exit.
 /// Using 0x00...DEAD (the classic burn address) — recognizable and conventional.
 pub const EXIT_ADDRESS: &str = "000000000000000000000000000000000000dead";
@@ -63,13 +60,6 @@ pub struct ExitRequest {
 /// Exit scanner — watches NEDB receipts for burns to EXIT_ADDRESS.
 pub struct ExitScanner {
     db: Arc<Db>,
-    /// WIF that funds releases. Its LEGACY P2PKH address holds the float we spend
-    /// (key-funded); unset → dry-run (the exactly-once guard keeps exits pending).
-    release_key_wif: Option<String>,
-    /// The bech32 bridge address (`ITC_BRIDGE_ADDRESS`) that change is returned
-    /// to. Cached so a missing/invalid value fails release cleanly (retryable),
-    /// not silently.
-    bridge_change_addr: Option<String>,
     /// Governance bridge fee in basis points — SAME env var, default, and cap
     /// as the deposit oracle (`OracleConfig`), so both directions charge the
     /// same 5% and can never drift apart.
@@ -83,12 +73,12 @@ impl ExitScanner {
             .and_then(|s| s.parse().ok())
             .unwrap_or(crate::DEFAULT_FEE_BPS)
             .min(crate::MAX_FEE_BPS);
-        ExitScanner {
-            db,
-            release_key_wif: std::env::var("ITC_BRIDGE_RELEASE_WIF").ok(),
-            bridge_change_addr: std::env::var("ITC_BRIDGE_ADDRESS").ok(),
-            fee_bps,
+        if std::env::var("ITC_BRIDGE_RELEASE_ENABLE").ok().as_deref() == Some("1") {
+            println!("[EXIT] release ENABLED — paying from the node wallet (bridge float) via sendtoaddress");
+        } else {
+            println!("[EXIT] release DRY-RUN — set ITC_BRIDGE_RELEASE_ENABLE=1 to pay out (exits queue safely until then)");
         }
+        ExitScanner { db, fee_bps }
     }
 
     /// Split gross sats into (net_release, fee) — the EXACT ceil rounding the
@@ -233,70 +223,29 @@ impl ExitScanner {
         );
     }
 
-    /// Pay `release_sats` to `l1_recipient` on ITC L1, funded from the bridge
-    /// WIF's LEGACY P2PKH float (key-funded), with change → the bech32 bridge
-    /// address. Legacy-signed input, segwit (P2WPKH) outputs — see
-    /// `itc_anchor::tx::build_release_tx`.
+    /// Pay `release_sats` to `l1_recipient` on ITC L1 by spending the BRIDGED
+    /// FUNDS directly — the node wallet (which holds the float at the bech32
+    /// bridge address) funds, SEGWIT-SIGNS, adds change back to itself, pays the
+    /// fee, and broadcasts via `sendtoaddress`. No external key, no separate
+    /// funding pool, no hand-rolled BIP143 signing on real money.
     ///
-    /// Error semantics matter for the exactly-once guard in `process_epoch`:
-    /// every path here fails BEFORE the tx leaves the process (unset WIF/addr,
-    /// no UTXO, build error) EXCEPT the final `broadcast_tx`, which only returns
-    /// Ok on an accepted txid and Err on a rejected/unreachable send (not in the
-    /// mempool → safe to retry). So an Err never corresponds to spent funds.
+    /// Dry-run unless `ITC_BRIDGE_RELEASE_ENABLE=1`, so a misconfigured node
+    /// never moves funds — the exactly-once guard keeps exits queued until it's
+    /// deliberately turned on.
+    ///
+    /// Error semantics for the exactly-once guard: this returns Ok ONLY on an
+    /// accepted txid; every failure (dry-run, RPC down, wallet locked,
+    /// insufficient funds) is Err with nothing spent → safe to retry.
     fn release_on_l1(&self, _l2_tx_hash: &str, l1_recipient: &str, release_sats: u64) -> Result<String, String> {
-        let wif = self.release_key_wif.as_deref()
-            .ok_or("ITC_BRIDGE_RELEASE_WIF not set -- release is dry-run")?;
-        let bridge_addr = self.bridge_change_addr.as_deref()
-            .ok_or("ITC_BRIDGE_ADDRESS not set (needed for the change output)")?;
-        let key = AnchorKey::from_wif(wif)?;
-
-        // Funding: the WIF's legacy P2PKH address. Pull the largest confirmed
-        // UTXO the node wallet sees for it (single-input v1 — the release wallet
-        // is consolidated; multi-input selection is a follow-up).
-        let funding_addr = key.p2pkh_address();
-        let utxo = itc_anchor::rpc::fetch_best_utxo(&funding_addr)?
-            .ok_or_else(|| format!("no spendable UTXO at bridge funding address {funding_addr}"))?;
-
-        // Output scripts: recipient (burner's ITC bech32) + change (bridge bech32).
-        let recipient_h160 = crate::oracle::hash160_from_bech32_address(l1_recipient)
-            .map_err(|e| format!("recipient address {l1_recipient}: {e}"))?;
-        let recipient_spk = p2wpkh_script_pubkey(&recipient_h160);
-        let change_h160 = crate::oracle::hash160_from_bech32_address(bridge_addr)
-            .map_err(|e| format!("bridge change address {bridge_addr}: {e}"))?;
-        let change_spk = p2wpkh_script_pubkey(&change_h160);
-
-        // Decode funding txid: display (reversed) hex → internal LE order.
-        let txid_bytes = hex::decode(&utxo.txid_hex).map_err(|e| format!("utxo txid hex: {e}"))?;
-        if txid_bytes.len() != 32 { return Err("utxo txid not 32 bytes".to_string()); }
-        let mut utxo_txid = [0u8; 32];
-        for (i, b) in txid_bytes.iter().rev().enumerate() { utxo_txid[i] = *b; }
-
-        let raw_tx = build_release_tx(
-            &key,
-            utxo_txid,
-            utxo.vout,
-            utxo.value_sats,
-            &recipient_spk,
-            release_sats,
-            &change_spk,
-            MIN_FEE_SATS,
-        )?;
-
-        // Broadcast via L1 sendrawtransaction — returns the node's txid on accept,
-        // Err on reject/unreachable (tx not in mempool → guard retries safely).
-        broadcast_tx(itc_proto::SEED_ANCHOR, itc_proto::MAGIC_MAIN, &raw_tx)
+        if std::env::var("ITC_BRIDGE_RELEASE_ENABLE").ok().as_deref() != Some("1") {
+            return Err("release dry-run (set ITC_BRIDGE_RELEASE_ENABLE=1 to pay from the bridge wallet)".to_string());
+        }
+        // The node wallet holds the bridged float and does the segwit signing +
+        // UTXO selection + change + fee. We hand it the recipient and the exact
+        // net amount (the 5% governance fee was already deducted into
+        // `release_sats` at queue time).
+        itc_anchor::rpc::send_to_address(l1_recipient, release_sats)
     }
-}
-
-/// P2WPKH scriptPubKey for a 20-byte witness program: `OP_0 <push20> <hash160>`
-/// = `0x00 0x14 <20 bytes>` (22 bytes). Paying to segwit needs no signing — only
-/// the legacy input is signed — which is what keeps the release path off BIP143.
-fn p2wpkh_script_pubkey(h160: &[u8; 20]) -> Vec<u8> {
-    let mut s = Vec::with_capacity(22);
-    s.push(0x00); // witness version 0
-    s.push(0x14); // push 20 bytes
-    s.extend_from_slice(h160);
-    s
 }
 
 #[cfg(test)]

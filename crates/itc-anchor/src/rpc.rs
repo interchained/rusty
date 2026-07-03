@@ -119,6 +119,59 @@ pub fn fetch_best_utxo(p2pkh_address: &str) -> Result<Option<Utxo>, String> {
     }))
 }
 
+/// Pay `sats` to `address` via the node wallet's `sendtoaddress` RPC.
+///
+/// The NODE wallet — which holds the bridge float at the bech32 bridge address —
+/// selects UTXOs, SEGWIT-SIGNS, adds change back to itself, pays the network fee,
+/// and broadcasts. So releasing the bridged funds needs no external key, no
+/// separate funding pool, and no hand-rolled BIP143 signing. Returns the L1 txid.
+///
+/// The amount is built as an EXACT 8-decimal number from the satoshi integer
+/// (no f64 rounding) so the recipient is paid to the satoshi.
+pub fn send_to_address(address: &str, sats: u64) -> Result<String, String> {
+    let url  = std::env::var("ITC_L1_RPC_URL")
+        .map_err(|_| "ITC_L1_RPC_URL not set".to_string())?;
+    let user = std::env::var("ITC_L1_RPC_USER").unwrap_or_default();
+    let pass = std::env::var("ITC_L1_RPC_PASS").unwrap_or_default();
+
+    // Exact ITC amount (8 decimals) from sats — parsed to a JSON number so no
+    // floating-point artifact can under/over-pay.
+    let amount_str = format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000);
+    let amount: serde_json::Value = serde_json::from_str(&amount_str)
+        .map_err(|e| format!("amount encode ({amount_str}): {e}"))?;
+
+    let body = serde_json::json!({
+        "jsonrpc": "1.0",
+        "id":      "itc-bridge-release",
+        "method":  "sendtoaddress",
+        "params":  [address, amount],
+    });
+
+    let response_text = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .set(
+            "Authorization",
+            &format!("Basic {}", base64_encode(format!("{user}:{pass}").as_bytes())),
+        )
+        .send_string(&body.to_string())
+        .map_err(|e| format!("sendtoaddress HTTP error: {e}"))?
+        .into_string()
+        .map_err(|e| format!("sendtoaddress response read error: {e}"))?;
+
+    let rpc_resp: RpcResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("sendtoaddress JSON parse error: {e}\nraw: {response_text}"))?;
+
+    if let Some(err) = rpc_resp.error {
+        if !err.is_null() {
+            return Err(format!("sendtoaddress node error: {err}"));
+        }
+    }
+    rpc_resp
+        .result
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .ok_or_else(|| "sendtoaddress: missing txid in response".to_string())
+}
+
 // ── Minimal base64 encoder (avoids pulling in a full base64 crate) ────────────
 //
 // Only used for the HTTP Basic Auth header.  Handles arbitrary byte slices.
