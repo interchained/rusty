@@ -381,12 +381,14 @@ fn main() {
         epoch
     };
 
-    // L2 block sequencer — ticks every 5s, drains mempool, executes txs, persists receipts
+    // L2 block sequencer — ticks every 5s, drains mempool, executes txs, persists
+    // receipts, and flushes L2 durably on every state-changing block + on shutdown.
     Sequencer::new(
         Arc::clone(&evm_shared),
         Arc::clone(&mempool),
         Arc::clone(&epoch),
         Arc::clone(&store.db),
+        Arc::clone(&shutdown),
     ).spawn();
     println!("itc-node[seq]: L2 sequencer started (5s blocks)");
 

@@ -17,7 +17,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,8 +32,11 @@ use itc_oracle::ExitScanner;
 /// L2 block time in seconds.
 pub const BLOCK_TIME_SECS: u64 = 5;
 
-/// L2 checkpoint cadence — flush every N produced blocks (not per-put).
-const BLOCK_FLUSH_EVERY: u64 = 500;
+/// Idle checkpoint cadence — flush every N *empty* produced blocks so a long
+/// quiet stretch still persists the advancing epoch without an fsync per 5s
+/// tick. Blocks that actually change L2 state flush IMMEDIATELY (see
+/// produce_block) — durability of a burn/receipt is never deferred to this.
+const IDLE_FLUSH_EVERY: u64 = 60; // ~5 min at 5s blocks
 
 /// A pending L2 transaction in the mempool.
 #[derive(Clone, Debug)]
@@ -81,12 +84,23 @@ pub struct Sequencer {
     epoch: Arc<AtomicU64>,
     db: Arc<Db>,
     exit_scanner: ExitScanner,
+    /// Process-wide shutdown flag (shared with main + the ctrlc handler). When
+    /// set, the sequencer seals a final block and flushes L2 durably before
+    /// exiting — its own clean-shutdown checkpoint, the L2 twin of L1's
+    /// flush-on-shutdown in main.rs / sync.rs.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Sequencer {
-    pub fn new(evm: Arc<Mutex<ItcEvm>>, mempool: Mempool, epoch: Arc<AtomicU64>, db: Arc<Db>) -> Self {
+    pub fn new(
+        evm: Arc<Mutex<ItcEvm>>,
+        mempool: Mempool,
+        epoch: Arc<AtomicU64>,
+        db: Arc<Db>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
         let exit_scanner = ExitScanner::new(Arc::clone(&db));
-        Sequencer { evm, mempool, epoch, db, exit_scanner }
+        Sequencer { evm, mempool, epoch, db, exit_scanner, shutdown }
     }
 
     /// Spawn the sequencer background thread.
@@ -97,7 +111,23 @@ impl Sequencer {
     fn run(self) {
         println!("[SEQ] L2 sequencer started — {BLOCK_TIME_SECS}s blocks");
         loop {
-            std::thread::sleep(Duration::from_secs(BLOCK_TIME_SECS));
+            // Shutdown-aware wait: sleep in 1s slices so a shutdown signal is
+            // noticed within ~1s instead of up to BLOCK_TIME_SECS later.
+            for _ in 0..BLOCK_TIME_SECS {
+                if self.shutdown.load(Ordering::Relaxed) { break; }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            if self.shutdown.load(Ordering::Relaxed) {
+                // Seal one last block (drains any final mempool txs, flushes on
+                // activity) then force a durable flush regardless — so the L2
+                // state (EVM accounts, receipts, queued exits) can never be lost
+                // to a shutdown that lands between checkpoints. Idempotent with
+                // the process-level ctrlc flush on the same shared Db.
+                self.produce_block();
+                self.db.flush_all();
+                println!("[SEQ] shutdown — final L2 flush complete");
+                return;
+            }
             self.produce_block();
         }
     }
@@ -125,15 +155,14 @@ impl Sequencer {
             .unwrap_or(0);
         eprint!("\r  [L1] {l1_h}  |  [L2] {block_num}   ");
 
-        // L2 checkpoint cadence: flush every BLOCK_FLUSH_EVERY produced blocks,
-        // regardless of whether THIS block had txs, so a long empty stretch
-        // doesn't widen the durability gap before the next real write.
-        if block_num % BLOCK_FLUSH_EVERY == 0 {
-            self.db.flush_all();
-        }
-
         if pending.is_empty() {
             self.epoch.store(block_num, Ordering::SeqCst);
+            // Idle block: no L2 state change. Checkpoint only periodically so a
+            // long quiet stretch still persists the advancing epoch / shared L1
+            // progress, without an fsync every 5s on a dead-idle chain.
+            if block_num % IDLE_FLUSH_EVERY == 0 {
+                self.db.flush_all();
+            }
             return;
         }
 
@@ -231,6 +260,16 @@ impl Sequencer {
 
         // Process any exits that have reached their confirmation threshold.
         self.exit_scanner.process_epoch(block_num);
+
+        // Durability: this block CHANGED L2 state — EVM accounts (committed
+        // per-tx via commit_changes), receipts, and any queued/processed exit
+        // records all landed in NEDB's in-memory write buffer. Checkpoint NOW,
+        // not up to IDLE_FLUSH_EVERY blocks later. A burn that isn't flushed is
+        // invisible after a crash/kill — and surviving a restart is the entire
+        // promise of the bridge. flush_all() is the real durability primitive
+        // (id-index WAL + segment fsync + MANIFEST), the same one L1 sync and
+        // the shutdown handler use.
+        self.db.flush_all();
     }
 
     fn persist_receipts(&self, receipts: &[TxReceipt], block_num: u64) {
@@ -314,4 +353,109 @@ fn bytes_to_u256(b: &[u8]) -> U256 {
     let start = 32 - b.len().min(32);
     arr[start..].copy_from_slice(&b[b.len().saturating_sub(32)..]);
     U256::from_be_bytes(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use itc_evm::NedbState;
+    use rlp::RlpStream;
+
+    /// 1 ITC in wei.
+    const ITC: U256 = U256::from_limbs([0x0DE0B6B3A7640000u64, 0, 0, 0]);
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 20])
+    }
+
+    /// Minimal legacy-tx RLP carrying exactly the fields build_tx_env_from_pending
+    /// reads (nonce, gasPrice, gasLimit, to, value, data) + dummy v/r/s so it is
+    /// a well-formed 9-item list. gasPrice 0 → the sender only needs `value`.
+    fn legacy_transfer_rlp(nonce: u64, to: Address, value: U256) -> Vec<u8> {
+        let mut vbytes = value.to_be_bytes::<32>().to_vec();
+        while vbytes.first() == Some(&0) { vbytes.remove(0); } // RLP minimal big-endian
+        let mut s = RlpStream::new_list(9);
+        s.append(&nonce);
+        s.append(&0u64);                 // gasPrice = 0
+        s.append(&21_000u64);            // gasLimit
+        s.append(&to.as_slice().to_vec());
+        s.append(&vbytes);               // value
+        s.append_empty_data();           // data
+        s.append(&27u64);                // v (dummy — not read)
+        s.append(&1u64);                 // r (dummy)
+        s.append(&1u64);                 // s (dummy)
+        s.out().to_vec()
+    }
+
+    /// Regression guard for the L2 durability fix: a block carrying a real
+    /// state-changing tx must execute, persist its receipt, AND flush — so the
+    /// receipt/account survive a reopen with NO 500-block wait. (Crash-timing —
+    /// kill -9 before the next checkpoint — is validated on the real node; this
+    /// pins the execute→persist→flush path that the fix reorganized.)
+    #[test]
+    fn produce_block_executes_persists_and_flushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let alice = addr(0x11);
+        let bob   = addr(0x22);
+        let tx_hash = B256::from([0xABu8; 32]);
+
+        {
+            let db = Arc::new(Db::open(&path, None).unwrap());
+            let mut evm = ItcEvm::new(Arc::clone(&db));
+            evm.seed_genesis_account(alice, ITC * U256::from(100));
+            let evm_arc = Arc::new(Mutex::new(evm));
+
+            let mempool = new_mempool();
+            submit_tx(&mempool, PendingTx {
+                raw: legacy_transfer_rlp(0, bob, ITC),
+                tx_hash,
+                from: alice,
+                gas_limit: 21_000,
+            });
+
+            let seq = Sequencer::new(
+                evm_arc,
+                mempool,
+                Arc::new(AtomicU64::new(0)),
+                Arc::clone(&db),
+                Arc::new(AtomicBool::new(false)),
+            );
+            seq.produce_block(); // block 1: one transfer → execute + persist + flush
+
+            // In-session: receipt persisted with success, bob credited.
+            let rid = format!("0x{}", hex::encode(tx_hash.as_slice()));
+            let receipt = db.get("l2_receipts", &rid).expect("receipt persisted");
+            assert_eq!(receipt.data["status"].as_str(), Some("0x1"));
+            let bob_acct = db.get("evm_accounts", &NedbState::addr_key(&bob))
+                .expect("bob account persisted");
+            assert_eq!(NedbState::hex_to_u256(bob_acct.data["balance"].as_str().unwrap()), ITC);
+        }
+
+        // Reopen from disk: the block's writes were flushed (not stranded in the
+        // write buffer awaiting a distant checkpoint) → still there after reopen.
+        let db2 = Db::open(&path, None).unwrap();
+        db2.startup_ready.store(true, Ordering::SeqCst);
+        let rid = format!("0x{}", hex::encode(tx_hash.as_slice()));
+        assert!(db2.get("l2_receipts", &rid).is_some(), "receipt must survive reopen");
+        assert!(db2.get("evm_accounts", &NedbState::addr_key(&bob)).is_some(),
+                "bob account must survive reopen");
+    }
+
+    /// The idle path flushes only on the IDLE_FLUSH_EVERY cadence — an empty
+    /// block must not error and must advance the epoch.
+    #[test]
+    fn empty_block_advances_epoch_without_txs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open(tmp.path(), None).unwrap());
+        let evm = Arc::new(Mutex::new(ItcEvm::new(Arc::clone(&db))));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let seq = Sequencer::new(
+            evm, new_mempool(), Arc::clone(&epoch),
+            Arc::clone(&db), Arc::new(AtomicBool::new(false)),
+        );
+        seq.produce_block();
+        assert_eq!(epoch.load(Ordering::SeqCst), 1, "empty block still advances the epoch");
+    }
 }
