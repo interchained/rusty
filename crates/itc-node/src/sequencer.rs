@@ -39,18 +39,14 @@ pub const BLOCK_TIME_SECS: u64 = 5;
 const IDLE_FLUSH_EVERY: u64 = 60; // ~5 min at 5s blocks
 
 /// A pending L2 transaction in the mempool.
-#[derive(Clone, Debug)]
-pub struct PendingTx {
-    /// Raw RLP-encoded transaction bytes.
-    pub raw: Vec<u8>,
-    /// Decoded tx hash (keccak256 of raw bytes).
-    pub tx_hash: B256,
-    /// Recovered sender address.
-    pub from: Address,
-    /// Gas limit from the tx.
-    #[allow(dead_code)]
-    pub gas_limit: u64,
-}
+///
+/// This is `itc_rpc::types::PendingTxRpc` — ONE canonical pending-tx type shared
+/// by the RPC (which enqueues) and the sequencer (which drains). Previously the
+/// sequencer had its own `PendingTx` while the RPC had `PendingTxRpc` and never
+/// used it, so RPC-submitted txs silently bypassed the sequencer entirely. Now
+/// there is a single type and a single queue: everything goes through the
+/// mempool → produce_block.
+pub use itc_rpc::types::PendingTxRpc as PendingTx;
 
 /// An executed transaction receipt — persisted to NEDB after block finalization.
 #[derive(Clone, Debug)]
@@ -63,7 +59,9 @@ pub struct TxReceipt {
     pub success: bool,
 }
 
-/// The L2 mempool — thread-safe pending tx queue.
+/// The L2 mempool — thread-safe pending tx queue. Identical to
+/// `itc_rpc::handler::SharedMempool`, so the RPC server and the sequencer share
+/// the exact same `Arc` (wired in main.rs).
 pub type Mempool = Arc<Mutex<VecDeque<PendingTx>>>;
 
 /// Create a new empty mempool.
@@ -200,7 +198,7 @@ impl Sequencer {
 
             let gas_used;
             let success;
-            match evm.execute_tx(tx_env, tx.tx_hash) {
+            match evm.execute_tx(tx_env, B256::from(tx.tx_hash)) {
                 Ok(result) => {
                     success = result.is_success();
                     gas_used = match result {
@@ -218,8 +216,8 @@ impl Sequencer {
 
             if success {
                 if let Some((amount_wei, calldata)) = exit_probe {
-                    let tx_hash_hex = format!("0x{}", hex::encode(tx.tx_hash.as_slice()));
-                    let from_hex    = format!("0x{}", hex::encode(tx.from.as_slice()));
+                    let tx_hash_hex = format!("0x{}", hex::encode(tx.tx_hash));
+                    let from_hex    = format!("0x{}", hex::encode(tx.from));
                     // Calldata → ITC L1 recipient. ASCII, trimmed; sanity-gated
                     // so garbage calldata can't route a release to a junk string.
                     let recipient = String::from_utf8(calldata)
@@ -240,8 +238,8 @@ impl Sequencer {
             }
 
             receipts.push(TxReceipt {
-                tx_hash: tx.tx_hash,
-                from: tx.from,
+                tx_hash: B256::from(tx.tx_hash),
+                from: Address::from(tx.from),
                 block_number: block_num,
                 gas_used,
                 success,
@@ -333,7 +331,7 @@ fn build_tx_env_from_pending(tx: &PendingTx) -> Option<revm::primitives::TxEnv> 
     };
 
     Some(TxEnv {
-        caller: tx.from,
+        caller: Address::from(tx.from),
         transact_to,
         value,
         data: Bytes::from(data_b),
@@ -397,9 +395,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().to_path_buf();
 
-        let alice = addr(0x11);
+        let alice_bytes = [0x11u8; 20];
+        let alice = Address::from(alice_bytes);
         let bob   = addr(0x22);
-        let tx_hash = B256::from([0xABu8; 32]);
+        let tx_hash: [u8; 32] = [0xABu8; 32];
 
         {
             let db = Arc::new(Db::open(&path, None).unwrap());
@@ -411,8 +410,7 @@ mod tests {
             submit_tx(&mempool, PendingTx {
                 raw: legacy_transfer_rlp(0, bob, ITC),
                 tx_hash,
-                from: alice,
-                gas_limit: 21_000,
+                from: alice_bytes,
             });
 
             let seq = Sequencer::new(

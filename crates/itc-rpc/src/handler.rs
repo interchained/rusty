@@ -20,7 +20,7 @@ pub type SharedEvm = Arc<Mutex<ItcEvm>>;
 pub type SharedMempool = Arc<std::sync::Mutex<std::collections::VecDeque<crate::types::PendingTxRpc>>>;
 
 /// Dispatch a JSON-RPC request to the appropriate handler.
-pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch: u64, db: Option<&SharedDb>) -> RpcResponse {
+pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch: u64, db: Option<&SharedDb>, mempool: &SharedMempool) -> RpcResponse {
     match method {
         // ── Identity ────────────────────────────────────────────────────────
         "eth_chainId" => {
@@ -139,16 +139,29 @@ pub fn dispatch(method: &str, params: &Value, id: Value, evm: &SharedEvm, epoch:
                 Ok(pair) => pair,
                 Err(e) => return RpcResponse::invalid_params(id, format!("tx decode: {e}")),
             };
-            let mut evm = evm.lock().unwrap();
-            match evm.execute_tx(tx_env, tx_hash) {
-                Ok(result) if result.is_success() => {
-                    RpcResponse::ok(id, json!(format!("0x{}", hex::encode(tx_hash.as_slice()))))
-                }
-                Ok(result) => {
-                    RpcResponse::err(id, 3, format!("execution failed: {:?}", result))
-                }
-                Err(e) => RpcResponse::internal(id, e),
+
+            // Reject an unrecoverable sender before it ever reaches the queue —
+            // decode_raw_tx returns Address::ZERO when ecrecover fails (bad sig /
+            // wrong chain id). Never enqueue a tx we cannot attribute.
+            if tx_env.caller == Address::ZERO {
+                return RpcResponse::err(id, 3, "invalid signature: sender unrecoverable".to_string());
             }
+
+            // ENQUEUE — do NOT execute inline. The sequencer's produce_block is
+            // the single execution path: it executes the tx, PERSISTS THE RECEIPT
+            // (so eth_getTransactionReceipt resolves → wallets advance past 0/1),
+            // runs BRIDGE-EXIT DETECTION (burns to 0x…dEaD get queued), and
+            // flushes durably. Inline execution here bypassed all three — the
+            // root cause of "burns land but the Oracle never sees them" and the
+            // stuck 0/1 confirmation. Returning the hash pre-execution is
+            // standard Ethereum semantics (the wallet then polls for the receipt).
+            let mut from = [0u8; 20];
+            from.copy_from_slice(tx_env.caller.as_slice());
+            let mut txh = [0u8; 32];
+            txh.copy_from_slice(tx_hash.as_slice());
+            mempool.lock().unwrap().push_back(PendingTxRpc { raw, tx_hash: txh, from });
+
+            RpcResponse::ok(id, json!(format!("0x{}", hex::encode(tx_hash.as_slice()))))
         }
 
         // ── Block info ───────────────────────────────────────────────────────
