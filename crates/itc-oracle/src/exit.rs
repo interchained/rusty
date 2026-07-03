@@ -6,8 +6,16 @@
 //!   2. The L2 exit scanner detects the burn in the executed tx receipts.
 //!   3. After EXIT_CONFIRMATIONS L2 blocks (default 1), the exit is finalized.
 //!   4. The exit processor builds and broadcasts an ITC L1 release transaction
-//!      sending the equivalent ITC to the L1 recipient, using the operator's
-//!      funded ITC key (ITC_BRIDGE_RELEASE_WIF).
+//!      sending the NET ITC (burn amount minus the 5% governance bridge fee —
+//!      same fee, same rounding, both directions) to the L1 recipient, using
+//!      the operator's funded ITC key (ITC_BRIDGE_RELEASE_WIF).
+//!
+//! Economics (round-trip symmetric):
+//!   deposit: lock 1.00 ITC  → mint    0.95 aITC (5% governance fee)
+//!   exit:    burn 1.00 aITC → release 0.95 ITC  (5% governance fee)
+//!   Fee bps come from ITC_BRIDGE_FEE_BPS (default 500, capped at 1000) —
+//!   the SAME env var and ceil rounding the deposit oracle uses, so the two
+//!   directions can never drift apart.
 //!
 //! Exit tx encoding (L2 side):
 //!   Send aITC to EXIT_ADDRESS (0x00...DEAD or a well-known system address)
@@ -60,17 +68,36 @@ pub struct ExitScanner {
     utxo_txid: Option<String>,
     utxo_vout: Option<u32>,
     utxo_value: Option<u64>,
+    /// Governance bridge fee in basis points — SAME env var, default, and cap
+    /// as the deposit oracle (`OracleConfig`), so both directions charge the
+    /// same 5% and can never drift apart.
+    fee_bps: u64,
 }
 
 impl ExitScanner {
     pub fn new(db: Arc<Db>) -> Self {
+        let fee_bps = std::env::var("ITC_BRIDGE_FEE_BPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(crate::DEFAULT_FEE_BPS)
+            .min(crate::MAX_FEE_BPS);
         ExitScanner {
             db,
             release_key_wif: std::env::var("ITC_BRIDGE_RELEASE_WIF").ok(),
             utxo_txid: std::env::var("ITC_RELEASE_UTXO_TXID").ok(),
             utxo_vout: std::env::var("ITC_RELEASE_UTXO_VOUT").ok().and_then(|s| s.parse().ok()),
             utxo_value: std::env::var("ITC_RELEASE_UTXO_VALUE").ok().and_then(|s| s.parse().ok()),
+            fee_bps,
         }
+    }
+
+    /// Split gross sats into (net_release, fee) — the EXACT ceil rounding the
+    /// deposit oracle uses (`OracleConfig::apply_fee`), mirrored here so a
+    /// round trip is symmetric to the satoshi.
+    fn apply_exit_fee(&self, gross_sats: u64) -> (u64, u64) {
+        let fee = (gross_sats * self.fee_bps + 9_999) / 10_000;
+        let net = gross_sats.saturating_sub(fee);
+        (net, fee)
     }
 
     /// Check for any pending exits that have reached their release block.
@@ -121,7 +148,9 @@ impl ExitScanner {
         }
     }
 
-    /// Queue an exit request detected in a tx receipt.
+    /// Queue an exit request detected in a tx receipt. The 5% governance
+    /// bridge fee is applied HERE (burn gross → release net), so the pending
+    /// record carries the exact split and the release path pays out net only.
     pub fn queue_exit(
         &self,
         l2_tx_hash: &str,
@@ -130,11 +159,15 @@ impl ExitScanner {
         l1_recipient: &str,
         burn_block: u64,
     ) {
-        let release_sats = (amount_wei / crate::SATS_TO_WEI_FACTOR as u128) as u64;
+        let gross_sats = (amount_wei / crate::SATS_TO_WEI_FACTOR as u128) as u64;
+        let (release_sats, fee_sats) = self.apply_exit_fee(gross_sats);
         let release_at = burn_block + EXIT_CONFIRMATIONS;
         let data = json!({
             "from_l2": from_l2,
             "amount_wei": amount_wei.to_string(),
+            "gross_sats": gross_sats,
+            "fee_sats": fee_sats,
+            "fee_bps": self.fee_bps,
             "release_sats": release_sats,
             "l1_recipient": l1_recipient,
             "burn_block": burn_block,
@@ -144,7 +177,8 @@ impl ExitScanner {
         let _ = self.db.put("l2_pending_exits", l2_tx_hash, data,
             vec![l2_tx_hash.to_string()], None, None);
         println!(
-            "[EXIT] queued {release_sats} sats for {l1_recipient} -- releasable at L2 block {release_at}"
+            "[EXIT] queued: burn {gross_sats} sats -> release {release_sats} sats (fee {fee_sats} @ {}bps) to {l1_recipient} -- releasable at L2 block {release_at}",
+            self.fee_bps
         );
     }
 
@@ -198,5 +232,56 @@ impl ExitScanner {
             .map_err(|e| format!("broadcast: {e}"))?;
 
         Ok(txid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exit fee must be byte-for-byte the deposit oracle's fee: same env
+    /// default, same ceil rounding. 1.00 burned -> 0.95 released at 500 bps,
+    /// and rounding always favors governance (ceil), never the bridge float.
+    #[test]
+    fn exit_fee_mirrors_deposit_fee_math() {
+        std::env::remove_var("ITC_BRIDGE_FEE_BPS");
+        let db = std::sync::Arc::new(nedb_engine::Db::in_memory());
+        let scanner = ExitScanner::new(db);
+
+        // 1.00 aITC (in sats) -> 0.95 ITC net, 0.05 fee.
+        let (net, fee) = scanner.apply_exit_fee(100_000_000);
+        assert_eq!(fee, 5_000_000);
+        assert_eq!(net, 95_000_000);
+
+        // Ceil rounding: 1 sat gross -> fee rounds UP to 1 sat, net 0.
+        let (net1, fee1) = scanner.apply_exit_fee(1);
+        assert_eq!(fee1, 1);
+        assert_eq!(net1, 0);
+
+        // Identity with the deposit-side formula for a spread of values.
+        for gross in [1u64, 99, 100_000, 123_456_789, 100_000_000_000] {
+            let expect_fee = (gross * 500 + 9_999) / 10_000;
+            let (n, f) = scanner.apply_exit_fee(gross);
+            assert_eq!(f, expect_fee, "fee mismatch at gross={gross}");
+            assert_eq!(n, gross - expect_fee, "net mismatch at gross={gross}");
+        }
+    }
+
+    /// queue_exit persists the full economic split for auditability.
+    #[test]
+    fn queue_exit_records_fee_split() {
+        std::env::remove_var("ITC_BRIDGE_FEE_BPS");
+        let db = std::sync::Arc::new(nedb_engine::Db::in_memory());
+        let scanner = ExitScanner::new(std::sync::Arc::clone(&db));
+
+        // Burn 1.00 aITC = 1e18 wei -> gross 1e8 sats -> net 0.95e8.
+        scanner.queue_exit("0xabc", "0xfeed", 1_000_000_000_000_000_000u128, "itc1qtestrecipient0000000000000000000000", 100);
+
+        let node = db.get("l2_pending_exits", "0xabc").expect("exit queued");
+        assert_eq!(node.data["gross_sats"].as_u64(), Some(100_000_000));
+        assert_eq!(node.data["fee_sats"].as_u64(), Some(5_000_000));
+        assert_eq!(node.data["release_sats"].as_u64(), Some(95_000_000));
+        assert_eq!(node.data["release_at_block"].as_u64(), Some(100 + EXIT_CONFIRMATIONS));
+        assert_eq!(node.data["l1_recipient"].as_str(), Some("itc1qtestrecipient0000000000000000000000"));
     }
 }
