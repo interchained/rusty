@@ -102,12 +102,25 @@ impl ExitScanner {
 
     /// Check for any pending exits that have reached their release block.
     /// Called by the sequencer after each block is finalized.
+    ///
+    /// EXACTLY-ONCE PAYOUT — the money-safety heart of the exit path (mirrors
+    /// the mint side's `oracle_minted` guard). Without this, `process_epoch`
+    /// runs every 5s block, `release_at_block <= current_block` stays true for
+    /// an already-paid exit forever, and the recipient is re-paid every block
+    /// until the release wallet is drained. The guard is BEFORE any payment:
+    ///
+    ///   l2_processed_exits[tx] == "released"  → already paid: drop from
+    ///       pending, skip. (idempotency — the drain guard.)
+    ///   l2_processed_exits[tx] == "releasing" → a release was (or may have
+    ///       been) broadcast before a crash: NEVER auto-retry — that risks a
+    ///       double-pay. Leave for manual review, skip every epoch.
+    ///
+    /// Intent is marked "releasing" and flushed BEFORE `release_on_l1` builds
+    /// or broadcasts, so a crash mid-broadcast is recoverable as "releasing"
+    /// (manual review) rather than silently re-released. A pre-broadcast
+    /// failure (dry-run / unconfigured / validation) clears the intent so a
+    /// transient failure retries next epoch — a SUCCESS can never re-fire.
     pub fn process_epoch(&self, current_block: u64) {
-        // In v1: scan NEDB l2_pending_exits for exits where release_at_block <= current_block
-        // This is a polling loop — production would use an event-driven approach.
-        // For now, we check up to 100 pending exits per epoch.
-        // nedb-engine's `list()` returns `Vec<Node>` directly (no Result), so
-        // iterate without `.ok()`.
         for node in self.db.list("l2_pending_exits") {
             let release_at = node.data.get("release_at_block")
                 .and_then(|v| v.as_u64())
@@ -115,7 +128,25 @@ impl ExitScanner {
             if current_block < release_at {
                 continue;
             }
-            // This exit is ready to release
+            let l2_tx_hash = node.id.clone();
+
+            // ── Exactly-once guard (BEFORE any payment) ──────────────────────
+            if let Some(prev) = self.db.get("l2_processed_exits", &l2_tx_hash) {
+                match prev.data.get("status").and_then(|v| v.as_str()) {
+                    Some("released") => {
+                        // Already paid. Ensure it's out of the pending scan and move on.
+                        let _ = self.db.delete("l2_pending_exits", &l2_tx_hash);
+                        continue;
+                    }
+                    Some("releasing") => {
+                        // In-flight across a crash — a broadcast may have happened.
+                        // Do NOT auto-retry (double-pay risk). Manual review only.
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             let l1_recipient = node.data.get("l1_recipient")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -123,25 +154,45 @@ impl ExitScanner {
             let release_sats = node.data.get("release_sats")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let l2_tx_hash = node.id.clone();
 
             if release_sats == 0 || l1_recipient.is_empty() {
                 continue;
             }
 
+            // Mark intent BEFORE broadcast and make it durable — so a crash
+            // between broadcast and the "released" write is recoverable as
+            // "releasing" (manual review), never silently re-paid.
+            let intent = json!({
+                "status": "releasing",
+                "l1_recipient": &l1_recipient,
+                "release_sats": release_sats,
+                "intent_block": current_block,
+            });
+            let _ = self.db.put("l2_processed_exits", &l2_tx_hash, intent, vec![], None, None);
+            self.db.flush_all();
+
             match self.release_on_l1(&l2_tx_hash, &l1_recipient, release_sats) {
                 Ok(l1_txid) => {
-                    println!("[EXIT] released {release_sats} sats to {l1_recipient} -- L1 tx {l1_txid}");
-                    // Mark as processed
                     let done = json!({
                         "status": "released",
                         "l1_txid": l1_txid,
+                        "l1_recipient": &l1_recipient,
+                        "release_sats": release_sats,
                         "release_block": current_block,
                     });
                     let _ = self.db.put("l2_processed_exits", &l2_tx_hash, done, vec![], None, None);
-                    // Remove from pending (best effort)
+                    let _ = self.db.delete("l2_pending_exits", &l2_tx_hash);
+                    self.db.flush_all();
+                    println!("[EXIT] released {release_sats} sats to {l1_recipient} -- L1 tx {l1_txid}");
                 }
                 Err(e) => {
+                    // All CURRENT release_on_l1 error paths fail BEFORE broadcast
+                    // (unset WIF/UTXO, validation), so clearing the intent is safe
+                    // and lets a transient failure retry next epoch. NOTE for the
+                    // real P2PKH release builder: if an error can occur AFTER the
+                    // broadcast leaves the process, that path must LEAVE the
+                    // "releasing" marker (manual review), not clear it.
+                    let _ = self.db.delete("l2_processed_exits", &l2_tx_hash);
                     println!("[EXIT] release failed for {l2_tx_hash}: {e}");
                 }
             }
@@ -283,5 +334,72 @@ mod tests {
         assert_eq!(node.data["release_sats"].as_u64(), Some(95_000_000));
         assert_eq!(node.data["release_at_block"].as_u64(), Some(100 + EXIT_CONFIRMATIONS));
         assert_eq!(node.data["l1_recipient"].as_str(), Some("itc1qtestrecipient0000000000000000000000"));
+    }
+
+    fn pending_exit(db: &std::sync::Arc<nedb_engine::Db>, tx: &str) {
+        db.put("l2_pending_exits", tx, json!({
+            "l1_recipient": "itc1qtestrecipient0000000000000000000000",
+            "release_sats": 95_000_000u64,
+            "release_at_block": 10u64,
+        }), vec![], None, None).unwrap();
+    }
+
+    /// THE drain guard: an exit already marked "released" must never be paid
+    /// again — process_epoch drops it from pending and does not re-attempt.
+    /// Without the guard, every 5s epoch re-released it until the wallet drained.
+    #[test]
+    fn released_exit_is_never_paid_twice() {
+        std::env::remove_var("ITC_BRIDGE_RELEASE_WIF");
+        let db = std::sync::Arc::new(nedb_engine::Db::in_memory());
+        let scanner = ExitScanner::new(std::sync::Arc::clone(&db));
+        let tx = "0xburn_released";
+        pending_exit(&db, tx);
+        db.put("l2_processed_exits", tx,
+            json!({"status":"released","l1_txid":"deadbeef"}), vec![], None, None).unwrap();
+
+        scanner.process_epoch(100); // well past release_at
+
+        assert!(db.get("l2_pending_exits", tx).is_none(),
+            "a released exit must be dropped from pending, never re-scanned");
+        assert_eq!(db.get("l2_processed_exits", tx).unwrap().data["status"].as_str(),
+            Some("released"), "processed record must stay released, not be overwritten");
+    }
+
+    /// In-flight ("releasing") exits — a crash mid-broadcast — must NOT auto-retry
+    /// (double-pay risk). They stay put for manual review.
+    #[test]
+    fn releasing_exit_is_not_auto_retried() {
+        std::env::remove_var("ITC_BRIDGE_RELEASE_WIF");
+        let db = std::sync::Arc::new(nedb_engine::Db::in_memory());
+        let scanner = ExitScanner::new(std::sync::Arc::clone(&db));
+        let tx = "0xburn_inflight";
+        pending_exit(&db, tx);
+        db.put("l2_processed_exits", tx,
+            json!({"status":"releasing","intent_block":11}), vec![], None, None).unwrap();
+
+        scanner.process_epoch(100);
+
+        assert_eq!(db.get("l2_processed_exits", tx).unwrap().data["status"].as_str(),
+            Some("releasing"), "in-flight exit must remain 'releasing' (manual review)");
+        assert!(db.get("l2_pending_exits", tx).is_some(),
+            "in-flight exit must not be auto-cleared");
+    }
+
+    /// A pre-broadcast failure (dry-run / unconfigured release) must clear the
+    /// intent so the exit stays retryable — never stranded as "releasing".
+    #[test]
+    fn dry_run_release_clears_intent_and_stays_retryable() {
+        std::env::remove_var("ITC_BRIDGE_RELEASE_WIF");
+        let db = std::sync::Arc::new(nedb_engine::Db::in_memory());
+        let scanner = ExitScanner::new(std::sync::Arc::clone(&db));
+        let tx = "0xburn_dryrun";
+        pending_exit(&db, tx);
+
+        scanner.process_epoch(100); // WIF unset → release_on_l1 errors pre-broadcast
+
+        assert!(db.get("l2_processed_exits", tx).is_none(),
+            "pre-broadcast failure must roll back the intent (not strand 'releasing')");
+        assert!(db.get("l2_pending_exits", tx).is_some(),
+            "a failed dry-run stays pending for a later retry");
     }
 }
