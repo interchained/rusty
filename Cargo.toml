@@ -18,4 +18,11 @@ authors = ["Interchained LLC"]
 # workspace on one resolved copy, structurally, instead of relying on every
 # future bump remembering to touch N Cargo.tomls in lockstep.
 [workspace.dependencies]
-nedb-engine = { git = "https://github.com/Eth-Interchained/nedb", tag = "v2.5.45", package = "nedb-engine" }
+# v2.6.1: cached segment read handles + positional reads (pread) on every point
+# read; six 2.5.55 correctness fixes (id-index WAL flush race under same-key
+# churn — exactly the l2_pending_exits/evm_accounts rewrite shape — seq-guarded
+# durable tips, MANIFEST fsync ordering, NQL LIMIT, batch index parity,
+# cold-scan seq off-by-one); lazy MANIFEST upgrade (no forced multi-million-
+# object rescan on pre-2.5.43 datadirs). Matters more now that the sequencer
+# flushes every state-changing block.
+nedb-engine = { git = "https://github.com/Eth-Interchained/nedb", tag = "v2.6.1", package = "nedb-engine" }

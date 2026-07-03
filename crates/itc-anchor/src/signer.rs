@@ -63,6 +63,19 @@ impl AnchorKey {
         s
     }
 
+    /// Legacy P2PKH address (base58check) for this key on ITC mainnet.
+    ///
+    /// Version byte 0x00 = `itc_proto::address::PUBKEY_ADDRESS`. This is the
+    /// key's LEGACY address — the bridge WIF is funded here so releases can spend
+    /// its UTXOs with the legacy sighash this signer already supports (no segwit
+    /// signing). Used to look up funding UTXOs via `listunspent`.
+    pub fn p2pkh_address(&self) -> String {
+        let mut payload = Vec::with_capacity(21);
+        payload.push(0x00); // ITC PUBKEY_ADDRESS (mainnet P2PKH version byte)
+        payload.extend_from_slice(&self.address_hash160);
+        bs58::encode(payload).with_check().into_string()
+    }
+
     /// Sign a sighash and return `DER(sig) || SIGHASH_ALL(0x01)`.
     pub fn sign_sighash(&self, sighash: &[u8; 32]) -> Vec<u8> {
         let secp = Secp256k1::new();
