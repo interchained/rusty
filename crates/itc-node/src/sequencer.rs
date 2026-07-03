@@ -137,6 +137,19 @@ impl Sequencer {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // Persist the L2 chain height so block numbers survive a restart. Without
+        // this the epoch counter starts at 0 on every boot and new blocks REUSE
+        // old numbers — colliding receipt block_number / block_hash and breaking
+        // the height↔tx relation (exits key their release on burn_block). This
+        // put rides the same flushes below (immediate on active blocks, cadence
+        // on idle), so a receipt's height is always durable before the receipt is.
+        // Restored on boot in main.rs.
+        let _ = self.db.put(
+            "l2_meta", "chain_height",
+            json!({ "height": block_num }),
+            vec![], None, None,
+        );
+
         // Drain up to 500 pending txs per block
         let pending: Vec<PendingTx> = {
             let mut mem = self.mempool.lock().unwrap();
